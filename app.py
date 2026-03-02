@@ -9,6 +9,7 @@ from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
+import requests
 
 # Google Sheets
 import gspread
@@ -111,17 +112,15 @@ def iso_now_seconds() -> str:
 
 def safe_client_ip() -> str:
     # Em Streamlit Cloud, pegar IP real do cliente não é confiável via app puro
-    # Mantemos campo para compatibilidade
     return ""
 
 
 def safe_user_agent() -> str:
-    # Idem, não confiável sem headers. Mantemos por compatibilidade
     return ""
 
 
 # ===============================
-# LINKS DE IMAGEM (Google Drive / GitHub raw)
+# IMAGENS (SOLUÇÃO DEFINITIVA)
 # ===============================
 def _extract_drive_file_id(url: str):
     if not url:
@@ -139,28 +138,51 @@ def _extract_drive_file_id(url: str):
     return None
 
 
-def drive_to_direct_image(url: str) -> str:
+def _is_drive_url(url: str) -> bool:
+    u = (url or "").lower()
+    return "drive.google.com" in u
+
+
+def _to_github_raw(url: str) -> str:
+    if "github.com" in url and "/blob/" in url:
+        return url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+    return url
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_image_bytes(url: str) -> Optional[bytes]:
     """
-    Converte links do Google Drive no formato /file/d/<ID>/view em link direto de imagem.
-    Requisito: o arquivo no Drive precisa estar compartilhado como "Anyone with the link".
-    Também converte GitHub /blob/ para raw.
+    Solução definitiva:
+    Baixa a imagem no backend e retorna bytes.
+    Isso evita o problema do Google Drive servir HTML, viewer, confirmações e redirects que quebram o <img>.
     """
     if not url:
-        return url
-    u = url.strip()
+        return None
 
-    # Já é link direto do Drive
-    if "drive.google.com/uc" in u:
-        return u
+    url = url.strip()
 
-    file_id = _extract_drive_file_id(u)
-    if file_id:
-        return f"https://drive.google.com/uc?export=view&id={file_id}"
+    # Google Drive: usa thumbnail que é o endpoint mais estável para embed de imagem
+    if _is_drive_url(url):
+        fid = _extract_drive_file_id(url)
+        if not fid:
+            return None
+        url = f"https://drive.google.com/thumbnail?id={fid}&sz=w1600"
 
-    if "github.com" in u and "/blob/" in u:
-        return u.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+    url = _to_github_raw(url)
 
-    return u
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=25, allow_redirects=True)
+        if r.status_code != 200:
+            return None
+
+        ctype = (r.headers.get("Content-Type") or "").lower()
+        if "image" not in ctype:
+            return None
+
+        return r.content
+    except Exception:
+        return None
 
 
 # ===============================
@@ -204,7 +226,6 @@ def _client_ip_allowed() -> bool:
 
     ip_str = safe_client_ip()
     if not ip_str:
-        # sem IP, por segurança bloqueia se houver regra
         return False
 
     try:
@@ -224,7 +245,7 @@ def _safe_get_admin_password() -> Optional[str]:
       2) variáveis de ambiente (YVORA_ADMIN_PASSWORD / ADMIN_PASSWORD)
     """
     try:
-        pw = st.secrets.get("admin_password")  # type: ignore[attr-defined]
+        pw = st.secrets.get("admin_password")
         if pw and str(pw).strip():
             return str(pw).strip()
     except Exception:
@@ -265,15 +286,14 @@ def _get_gsheets_conf() -> dict:
       private_key="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
       client_email="..."
       token_uri="https://oauth2.googleapis.com/token"
-      (demais campos ok)
     """
     gs = {}
     try:
-        gs = dict(st.secrets.get("gsheets", {}))  # type: ignore[attr-defined]
+        gs = dict(st.secrets.get("gsheets", {}))
     except Exception:
         gs = {}
 
-    sheet_id = gs.get("sheet_id") or st.secrets.get("sheet_id")  # type: ignore[attr-defined]
+    sheet_id = gs.get("sheet_id") or st.secrets.get("sheet_id")
     if not sheet_id:
         raise RuntimeError("Faltou configurar o sheet_id em secrets (seção [gsheets]).")
 
@@ -288,7 +308,7 @@ def _get_gsheets_conf() -> dict:
 @st.cache_resource
 def _gs_client() -> gspread.Client:
     try:
-        sa_info = dict(st.secrets["gcp_service_account"])  # type: ignore[index]
+        sa_info = dict(st.secrets["gcp_service_account"])
     except Exception:
         raise RuntimeError("Faltou configurar [gcp_service_account] nos Secrets do Streamlit.")
 
@@ -306,11 +326,6 @@ def _open_sheet():
 
 
 def _ensure_headers_compat(ws, headers: List[str]) -> None:
-    """
-    Evita apagar dados.
-    Se estiver vazio: cria cabeçalho.
-    Se existir cabeçalho diferente: garante que todas as colunas de 'headers' existam, adicionando as que faltarem ao final.
-    """
     try:
         first_row = ws.row_values(1)
     except Exception:
@@ -623,10 +638,10 @@ def load_menu() -> List[dict]:
     return load_menu_from_url(url)
 
 
-def get_dish_image(dish: dict) -> Optional[str]:
+def get_dish_image(dish: dict):
     url = str(dish.get("ImagemURL", "") or "").strip()
     if url:
-        return drive_to_direct_image(url)
+        return fetch_image_bytes(url)
     return find_image_by_id(str(dish.get("Id", "")))
 
 
@@ -721,10 +736,8 @@ def inject_css() -> None:
 def render_header() -> None:
     col1, col2 = st.columns([1, 3])
     with col1:
-        # Logo primeiro na raiz do repo (como você salvou: yvora_logo.png)
         if os.path.exists(ROOT_LOGO_PATH):
             st.image(ROOT_LOGO_PATH, use_container_width=True)
-        # Alternativa: logo dentro de asset/yvora_logo.png
         elif os.path.exists(LOGO_PATH):
             st.image(LOGO_PATH, use_container_width=True)
         else:
@@ -981,10 +994,7 @@ def admin_reports_screen(menu: List[dict]) -> None:
 
     st.subheader("Relatórios")
     st.caption("Tela de Admin mantida conforme estrutura atual.")
-
-    st.info(
-        "Se você quiser evoluir esta página com ranking, filtros e exportação, eu adapto sem mudar a navegação."
-    )
+    st.info("Se você quiser evoluir esta página com ranking, filtros e exportação, eu adapto sem mudar a navegação.")
 
 
 # ===============================
