@@ -3,3 +3,4 @@ gspread>=6.0.0
 google-auth>=2.30.0
 pandas>=2.0.0
 altair>=5.0.0
+requests
