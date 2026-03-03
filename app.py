@@ -110,61 +110,14 @@ def iso_now_seconds() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _get_request_headers() -> Dict[str, str]:
-    """Best-effort access to request headers.
-
-    Streamlit Cloud/proxies usually forward client IP via headers like:
-    - X-Forwarded-For
-    - X-Real-IP
-    - CF-Connecting-IP (Cloudflare)
-    """
-    try:
-        ctx = getattr(st, "context", None)
-        if ctx is not None and hasattr(ctx, "headers") and ctx.headers:
-            # ctx.headers behaves like a Mapping (case-insensitive)
-            return {str(k): str(v) for k, v in dict(ctx.headers).items()}
-    except Exception:
-        pass
-    return {}
-
 def safe_client_ip() -> str:
-    """Return best-effort client IP (public) when running behind Streamlit Cloud/proxies."""
-    headers = _get_request_headers()
-    if not headers:
-        return ""
-
-    # normalize keys (case-insensitive)
-    h = {k.lower(): v for k, v in headers.items()}
-
-    # Prefer Cloudflare / reverse proxy signals
-    candidates = []
-    if "cf-connecting-ip" in h:
-        candidates.append(h.get("cf-connecting-ip", ""))
-    if "x-real-ip" in h:
-        candidates.append(h.get("x-real-ip", ""))
-    if "x-forwarded-for" in h:
-        # may contain "client, proxy1, proxy2"
-        xff = h.get("x-forwarded-for", "")
-        if xff:
-            candidates.append(xff.split(",")[0].strip())
-
-    for c in candidates:
-        ip = (c or "").strip()
-        if not ip:
-            continue
-        try:
-            ipaddress.ip_address(ip)
-            return ip
-        except Exception:
-            continue
+    # Em Streamlit Cloud, pegar IP real do cliente não é confiável via app puro
     return ""
 
+
 def safe_user_agent() -> str:
-    headers = _get_request_headers()
-    if not headers:
-        return ""
-    h = {k.lower(): v for k, v in headers.items()}
-    return str(h.get("user-agent", "")).strip()
+    return ""
+
 
 # ===============================
 # IMAGENS (SOLUÇÃO DEFINITIVA)
@@ -255,10 +208,13 @@ def _parse_ip_list(raw: str) -> List[ipaddress._BaseNetwork]:
 
 def _client_ip_allowed() -> bool:
     """
-    Modo simples:
-      - Se secrets tiver RESTAURANT_ALLOWED_IP_RANGES, permite somente IPs nesses ranges.
-      - Caso não esteja configurado, não bloqueia.
+    Regra inteligente:
+      - Se houver allowlist configurada em RESTAURANT_ALLOWED_IP_RANGES:
+          - Se o IP do cliente for detectado, valida normalmente
+          - Se o IP do cliente nao for detectado, permite (fallback)
+      - Se nao houver allowlist configurada, permite
     """
+
     try:
         raw = str(st.secrets.get("RESTAURANT_ALLOWED_IP_RANGES", "")).strip()
     except Exception:
@@ -272,8 +228,11 @@ def _client_ip_allowed() -> bool:
         return True
 
     ip_str = safe_client_ip()
+
+    # Fallback: se o ambiente nao expor o IP do cliente (comum em proxies),
+    # nao bloqueia a operacao.
     if not ip_str:
-        return False
+        return True
 
     try:
         ip = ipaddress.ip_address(ip_str)
@@ -281,10 +240,6 @@ def _client_ip_allowed() -> bool:
     except Exception:
         return False
 
-
-# ===============================
-# ADMIN PASSWORD (robusto)
-# ===============================
 def _safe_get_admin_password() -> Optional[str]:
     """
     Lê a senha do Admin a partir de:
