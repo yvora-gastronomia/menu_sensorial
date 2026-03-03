@@ -1,226 +1,169 @@
-import os
-import re
-import io
-import csv
 import hashlib
-import urllib.request
-import ipaddress
-from datetime import datetime, date
+import io
+from pathlib import Path
+import unicodedata
 from typing import Dict, List, Optional, Tuple
 
-import streamlit as st
+import pandas as pd
 import requests
+import streamlit as st
 
-# Google Sheets
-import gspread
-from google.oauth2.service_account import Credentials
-
-
-# ===============================
-# CONFIGURAÇÕES
-# ===============================
-APP_TITLE = "Cardápio Sensorial | YVORA"
-
-ASSET_DIR = "asset"
-LOGO_PATH = os.path.join(ASSET_DIR, "yvora_logo.png")
-ROOT_LOGO_PATH = "yvora_logo.png"  # logo na raiz do repo
-DISH_IMG_DIR = os.path.join(ASSET_DIR, "dishes")
-
-COLOR_NAVY = "#0E2A47"
-COLOR_CREAM = "#EFE7DD"
-COLOR_GOLD = "#C6A96A"
-COLOR_SILVER = "#C0C0C0"
-COLOR_BRONZE = "#CD7F32"
-COLOR_INK = "#0B2238"
-
-DEFAULT_SHEETS_CSV_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "1sM5MydAxcn5t0SeeU-cpRR9z3iFPeCYSBCgZ8GYArFk"
-    "/gviz/tq?tqx=out:csv&sheet=menu.csv"
-)
-
-# Nomes das abas no Google Sheet (pode trocar via secrets)
-DEFAULT_WS_EVALS = "evaluations"
-DEFAULT_WS_INTERACTIONS = "interactions"
-DEFAULT_WS_SETTINGS = "settings"
-
-# Controle básico (anti flood / anti duplicidade)
-RATE_LIMIT_SECONDS = 20
-ALLOW_DUPLICATE_SAME_DISH_PER_DAY = False
+# [AJUSTE PONTUAL] Restrição por IP (somente adiciona, sem alterar fluxo existente)
+import ipaddress
 
 
-# ===============================
-# OPÇÕES SENSORIAIS
-# ===============================
-INTENTIONS = ["Brinde", "Conexão", "Descoberta", "Prazer", "Desacelerar"]
-INTENT_DESC = {
-    "Brinde": "Abriu a noite com leveza, clima de celebração e energia social.",
-    "Conexão": "Favoreceu conversa, compartilhamento e presença à mesa.",
-    "Descoberta": "Trouxe sensação de experimentar algo novo, curioso e diferente.",
-    "Prazer": "Entregou prazer imediato, sabor direto e sensação de acerto fácil.",
-    "Desacelerar": "Convidou a comer com calma, aproveitar o tempo e sentir as camadas do prato.",
-}
+APP_TITLE = "YVORA Wine Pairing"
+BRAND_BG = "#EFE7DD"
+BRAND_BLUE = "#0E2A47"
+BRAND_MUTED = "#6B7785"
+BRAND_CARD = "#F5EFE7"
+BRAND_WARN = "#F3D6CF"
 
-AXIS_LABELS = [
-    "Clássico e Sutil",
-    "Clássico e Marcante",
-    "Fora do obvio e Sutil",
-    "Fora do obvio e Marcante",
+# Logo can live either at repo root (as in your current GitHub layout)
+# or inside an assets/ folder. The app will auto-detect.
+BASE_DIR = Path(__file__).resolve().parent
+
+POSSIBLE_LOGOS = [
+    BASE_DIR / "yvora_logo.png",
+    BASE_DIR / "assets" / "yvora_logo.png",
 ]
-AXIS_DESC = {
-    "Clássico e Sutil": "Tradicional e elegante, com delicadeza e pouca intervenção.",
-    "Clássico e Marcante": "Tradicional, com presença forte e assinatura clara de sabor.",
-    "Fora do obvio e Sutil": "Diferente, mas delicado, surpreende sem chocar.",
-    "Fora do obvio e Marcante": "Diferente e intenso, com impacto e personalidade.",
-}
-
-HARMONIES = ["Equilibrada", "Contrastante", "Surpreendente", "Provocativa"]
-HARM_DESC = {
-    "Equilibrada": "Encaixe natural, nada disputa atenção.",
-    "Contrastante": "Alternância de sabores com contraste interessante.",
-    "Surpreendente": "Combinação inesperada, sensação clara de descoberta.",
-    "Provocativa": "Ousada e intensa, para quem gosta de personalidade.",
-}
 
 
-# ===============================
-# UTILITÁRIOS
-# ===============================
-def ensure_dirs() -> None:
-    os.makedirs(DISH_IMG_DIR, exist_ok=True)
+def _find_logo_path() -> Path:
+    for p in POSSIBLE_LOGOS:
+        try:
+            if p.exists():
+                return p
+        except Exception:
+            continue
+    # Default to root path (keeps a stable absolute path string even if missing)
+    return POSSIBLE_LOGOS[0]
 
 
-def normalize_phone(phone: str) -> str:
-    return re.sub(r"\D+", "", phone or "")
+LOGO_LOCAL_PATH = _find_logo_path()
 
 
-def phone_hash(phone: str) -> str:
-    return hashlib.sha256(normalize_phone(phone).encode("utf-8")).hexdigest()
+def _get_secret(key: str, default: str = "") -> str:
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
 
 
-def find_image_by_id(dish_id: str) -> Optional[str]:
-    for ext in ["webp", "jpg", "jpeg", "png"]:
-        p = os.path.join(DISH_IMG_DIR, f"{dish_id}.{ext}")
-        if os.path.exists(p):
-            return p
-    return None
-
-
-def iso_now_seconds() -> str:
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def safe_client_ip() -> str:
-    # Em Streamlit Cloud, pegar IP real do cliente não é confiável via app puro
-    return ""
-
-
-def safe_user_agent() -> str:
-    return ""
-
-
-# ===============================
-# IMAGENS (SOLUÇÃO DEFINITIVA)
-# ===============================
-def _extract_drive_file_id(url: str):
-    if not url:
-        return None
-    u = url.strip()
-
-    m = re.search(r"/file/d/([a-zA-Z0-9_-]+)", u)
-    if m:
-        return m.group(1)
-
-    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", u)
-    if m:
-        return m.group(1)
-
-    return None
-
-
-def _is_drive_url(url: str) -> bool:
-    u = (url or "").lower()
-    return "drive.google.com" in u
-
-
-def _to_github_raw(url: str) -> str:
-    if "github.com" in url and "/blob/" in url:
-        return url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-    return url
+def norm_text(x) -> str:
+    if pd.isna(x):
+        return ""
+    s = str(x)
+    # evita alguns caracteres que às vezes viram símbolos em fontes/ambientes específicos
+    s = s.replace("—", "-").replace("–", "-").replace("•", "-")
+    s = unicodedata.normalize("NFC", s)
+    return s.strip()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_image_bytes(url: str) -> Optional[bytes]:
+def get_asset_bytes(local_path: Path, fallback_url: str = "") -> Optional[bytes]:
+    """Load an asset from repo (preferred) or from a public URL (fallback).
+    This avoids broken relative paths when deploying on Streamlit Cloud.
     """
-    Solução definitiva:
-    Baixa a imagem no backend e retorna bytes.
-    Isso evita o problema do Google Drive servir HTML, viewer, confirmações e redirects que quebram o <img>.
-    """
-    if not url:
-        return None
-
-    url = url.strip()
-
-    # Google Drive: usa thumbnail que é o endpoint mais estável para embed de imagem
-    if _is_drive_url(url):
-        fid = _extract_drive_file_id(url)
-        if not fid:
-            return None
-        url = f"https://drive.google.com/thumbnail?id={fid}&sz=w1600"
-
-    url = _to_github_raw(url)
-
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=25, allow_redirects=True)
-        if r.status_code != 200:
-            return None
-
-        ctype = (r.headers.get("Content-Type") or "").lower()
-        if "image" not in ctype:
-            return None
-
-        return r.content
+        if local_path.exists():
+            return local_path.read_bytes()
     except Exception:
-        return None
+        pass
+
+    fb = norm_text(fallback_url)
+    if fb:
+        try:
+            r = requests.get(fb, timeout=30)
+            r.raise_for_status()
+            return r.content
+        except Exception:
+            return None
+    return None
+
+
+def render_logo(width: Optional[int] = None, use_container_width: bool = False):
+    """Renders the logo robustly.
+    Configure one of these in Streamlit secrets:
+    - LOGO_URL: public URL (recommended: GitHub raw URL)
+    """
+    logo_url = _get_secret("LOGO_URL", "")
+    b = get_asset_bytes(LOGO_LOCAL_PATH, logo_url)
+    if b:
+        st.image(b, width=width, use_container_width=use_container_width)
+    else:
+        st.caption("Logo não encontrada. Inclua em assets/ ou configure LOGO_URL em secrets.")
 
 
 # ===============================
-# RESTRIÇÃO POR WIFI (IP)
+# [AJUSTE PONTUAL] Restrição por IP do restaurante
+# Secrets esperado:
+# RESTAURANT_ALLOWED_IP_RANGES = "191.250.250.41/32"
+# Opcionalmente múltiplos separados por vírgula:
+# "191.250.250.41/32, 200.10.0.0/16"
 # ===============================
-def _parse_ip_list(raw: str) -> List[ipaddress._BaseNetwork]:
-    nets: List[ipaddress._BaseNetwork] = []
+def safe_client_ip() -> str:
+    """
+    Obtém o IP do cliente via headers do proxy do Streamlit Cloud.
+    Se não conseguir, retorna string vazia.
+    """
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        ctx = get_script_run_ctx()
+        if not ctx or not hasattr(ctx, "request"):
+            return ""
+
+        req = ctx.request
+        headers = req.headers or {}
+
+        xff = headers.get("X-Forwarded-For") or headers.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[0].strip()
+
+        xrip = headers.get("X-Real-IP") or headers.get("x-real-ip")
+        if xrip:
+            return xrip.strip()
+
+        return ""
+    except Exception:
+        return ""
+
+
+def _parse_ip_ranges(raw: str) -> List[ipaddress._BaseNetwork]:
     raw = (raw or "").strip()
     if not raw:
-        return nets
+        return []
+
     parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+    nets: List[ipaddress._BaseNetwork] = []
     for p in parts:
         try:
-            if "/" in p:
-                nets.append(ipaddress.ip_network(p, strict=False))
-            else:
-                ip = ipaddress.ip_address(p)
-                nets.append(ipaddress.ip_network(f"{ip}/32", strict=False))
+            nets.append(ipaddress.ip_network(p, strict=False))
         except Exception:
-            continue
+            # Se vier um IP puro sem /32, tenta converter automaticamente
+            try:
+                ip = ipaddress.ip_address(p)
+                if ip.version == 4:
+                    nets.append(ipaddress.ip_network(f"{p}/32", strict=False))
+                else:
+                    nets.append(ipaddress.ip_network(f"{p}/128", strict=False))
+            except Exception:
+                continue
     return nets
 
 
-def _client_ip_allowed() -> bool:
+def is_restaurant_ip_allowed() -> bool:
     """
-    Modo simples:
-      - Se secrets tiver RESTAURANT_ALLOWED_IP_RANGES, permite somente IPs nesses ranges.
-      - Caso não esteja configurado, não bloqueia.
+    Se RESTAURANT_ALLOWED_IP_RANGES não estiver configurado, não bloqueia nada.
+    Se estiver configurado e não conseguir identificar IP do cliente, bloqueia.
     """
-    try:
-        raw = str(st.secrets.get("RESTAURANT_ALLOWED_IP_RANGES", "")).strip()
-    except Exception:
-        raw = ""
-
+    raw = _get_secret("RESTAURANT_ALLOWED_IP_RANGES", "")
+    raw = norm_text(raw)
     if not raw:
         return True
 
-    nets = _parse_ip_list(raw)
+    nets = _parse_ip_ranges(raw)
     if not nets:
         return True
 
@@ -235,497 +178,118 @@ def _client_ip_allowed() -> bool:
         return False
 
 
-# ===============================
-# ADMIN PASSWORD (robusto)
-# ===============================
-def _safe_get_admin_password() -> Optional[str]:
-    """
-    Lê a senha do Admin a partir de:
-      1) st.secrets["admin_password"]
-      2) variáveis de ambiente (YVORA_ADMIN_PASSWORD / ADMIN_PASSWORD)
-    """
+def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    for c in df.columns:
+        df[c] = df[c].apply(norm_text)
+    return df
+
+
+def to_int(x, default: int = 0) -> int:
+    s = norm_text(x)
+    if s == "":
+        return default
     try:
-        pw = st.secrets.get("admin_password")
-        if pw and str(pw).strip():
-            return str(pw).strip()
+        return int(float(s))
     except Exception:
-        pass
-
-    for k in ("YVORA_ADMIN_PASSWORD", "ADMIN_PASSWORD"):
-        v = os.getenv(k)
-        if v and str(v).strip():
-            return str(v).strip()
-
-    return None
+        return default
 
 
-def _admin_config_message() -> str:
-    return (
-        "Senha do Admin não configurada em secrets.\n\n"
-        "No Streamlit Cloud, abra Settings -> Secrets e adicione:\n\n"
-        'admin_password = "SUA_SENHA"'
-    )
-
-
-# ===============================
-# GOOGLE SHEETS (persistência)
-# ===============================
-def _get_gsheets_conf() -> dict:
-    """
-    Espera em secrets:
-      [gsheets]
-      sheet_id = "..."
-      evaluations_ws = "evaluations" (opcional)
-      interactions_ws = "interactions" (opcional)
-      settings_ws = "settings" (opcional)
-
-    E credenciais:
-      [gcp_service_account]
-      type="service_account"
-      project_id="..."
-      private_key="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-      client_email="..."
-      token_uri="https://oauth2.googleapis.com/token"
-    """
-    gs = {}
-    try:
-        gs = dict(st.secrets.get("gsheets", {}))
-    except Exception:
-        gs = {}
-
-    sheet_id = gs.get("sheet_id") or st.secrets.get("sheet_id")
-    if not sheet_id:
-        raise RuntimeError("Faltou configurar o sheet_id em secrets (seção [gsheets]).")
-
-    return {
-        "sheet_id": str(sheet_id).strip(),
-        "evaluations_ws": str(gs.get("evaluations_ws") or DEFAULT_WS_EVALS),
-        "interactions_ws": str(gs.get("interactions_ws") or DEFAULT_WS_INTERACTIONS),
-        "settings_ws": str(gs.get("settings_ws") or DEFAULT_WS_SETTINGS),
-    }
-
-
-@st.cache_resource
-def _gs_client() -> gspread.Client:
-    try:
-        sa_info = dict(st.secrets["gcp_service_account"])
-    except Exception:
-        raise RuntimeError("Faltou configurar [gcp_service_account] nos Secrets do Streamlit.")
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
-    return gspread.authorize(creds)
-
-
-def _open_sheet():
-    conf = _get_gsheets_conf()
-    return _gs_client().open_by_key(conf["sheet_id"])
-
-
-def _ensure_headers_compat(ws, headers: List[str]) -> None:
-    try:
-        first_row = ws.row_values(1)
-    except Exception:
-        first_row = []
-
-    if not first_row:
-        ws.update("A1", [headers])
-        return
-
-    normalized = [str(c).strip() for c in first_row]
-    wanted = [str(c).strip() for c in headers]
-
-    missing = [h for h in wanted if h not in normalized]
-    if not missing:
-        return
-
-    new_header = normalized + missing
-    ws.update("A1", [new_header])
-
-
-def _ensure_worksheet(sheet, title: str, headers: List[str]):
-    try:
-        ws = sheet.worksheet(title)
-    except Exception:
-        ws = sheet.add_worksheet(title=title, rows=2000, cols=max(10, len(headers) + 5))
-
-    _ensure_headers_compat(ws, headers)
-    return ws
-
-
-@st.cache_resource
-def _ws_handles():
-    conf = _get_gsheets_conf()
-    sh = _open_sheet()
-
-    ws_evals = _ensure_worksheet(
-        sh,
-        conf["evaluations_ws"],
-        headers=[
-            "created_at",
-            "dish_id",
-            "dish_name",
-            "user_name",
-            "user_phone",
-            "user_hash",
-            "consent_marketing",
-            "intention",
-            "axis",
-            "harmony",
-            "client_ip",
-            "user_agent",
-        ],
-    )
-
-    ws_inter = _ensure_worksheet(
-        sh,
-        conf["interactions_ws"],
-        headers=[
-            "created_at",
-            "dish_id",
-            "user_hash",
-            "interaction_type",
-            "value",
-        ],
-    )
-
-    ws_set = _ensure_worksheet(
-        sh,
-        conf["settings_ws"],
-        headers=["key", "value"],
-    )
-
-    return {"evaluations": ws_evals, "interactions": ws_inter, "settings": ws_set}
-
-
-@st.cache_data(ttl=15)
-def _read_ws_records(kind: str) -> List[dict]:
-    ws = _ws_handles()[kind]
-    try:
-        return ws.get_all_records()
-    except Exception:
-        return []
-
-
-def _clear_ws_cache():
-    try:
-        _read_ws_records.clear()
-    except Exception:
-        pass
-    try:
-        load_menu_from_url.clear()
-    except Exception:
-        pass
-
-
-def set_setting(key: str, value: str) -> None:
-    ws = _ws_handles()["settings"]
-    rows = _read_ws_records("settings")
-    key = str(key).strip()
-    value = str(value).strip()
-
-    for i, r in enumerate(rows, start=2):
-        if str(r.get("key", "")).strip() == key:
-            ws.update(f"B{i}", value)
-            _clear_ws_cache()
-            return
-
-    ws.append_row([key, value], value_input_option="RAW")
-    _clear_ws_cache()
-
-
-def get_setting(key: str) -> Optional[str]:
-    key = str(key).strip()
-    rows = _read_ws_records("settings")
-    for r in rows:
-        if str(r.get("key", "")).strip() == key:
-            v = r.get("value")
-            return str(v).strip() if v is not None else None
-    return None
-
-
-def get_menu_url() -> str:
-    val = get_setting("menu_csv_url")
-    if val and val.strip():
-        return val.strip()
-    return DEFAULT_SHEETS_CSV_URL
-
-
-def save_interaction(dish_id: str, user_hash: str, itype: str, value: str) -> None:
-    ws = _ws_handles()["interactions"]
-    ws.append_row(
-        [iso_now_seconds(), str(dish_id), str(user_hash), str(itype), str(value)],
-        value_input_option="RAW",
-    )
-    _clear_ws_cache()
-
-
-def already_voted_today(dish_id: str, user_hash: str) -> bool:
-    if ALLOW_DUPLICATE_SAME_DISH_PER_DAY:
-        return False
-
-    did = str(dish_id).strip()
-    uhash = str(user_hash).strip()
-    today = date.today().isoformat()
-
-    rows = _read_ws_records("evaluations")
-    for r in rows:
-        if str(r.get("dish_id", "")).strip() != did:
-            continue
-        if str(r.get("user_hash", "")).strip() != uhash:
-            continue
-        created_at = str(r.get("created_at", "")).strip()
-        if created_at[:10] == today:
-            return True
-    return False
-
-
-def save_evaluation(
-    dish_id: str,
-    dish_name: str,
-    user_name: str,
-    user_phone: str,
-    consent_marketing: bool,
-    intention: str,
-    axis_label: str,
-    harmony: str,
-    client_ip: str,
-    user_agent: str,
-) -> Tuple[bool, str]:
-    created_at = iso_now_seconds()
-    uhash = phone_hash(user_phone)
-
-    if already_voted_today(dish_id, uhash):
-        return False, "Você já avaliou este prato hoje. Obrigado."
-
-    ws = _ws_handles()["evaluations"]
-    ws.append_row(
-        [
-            created_at,
-            str(dish_id),
-            str(dish_name),
-            user_name.strip(),
-            normalize_phone(user_phone),
-            uhash,
-            1 if consent_marketing else 0,
-            intention,
-            axis_label,
-            harmony,
-            str(client_ip or ""),
-            str(user_agent or "")[:500],
-        ],
-        value_input_option="RAW",
-    )
-
-    save_interaction(str(dish_id), uhash, "intention", intention)
-    save_interaction(str(dish_id), uhash, "axis", axis_label)
-    save_interaction(str(dish_id), uhash, "harmony", harmony)
-
-    _clear_ws_cache()
-    return True, "Avaliação enviada com sucesso."
-
-
-def fetch_counts(dish_id: str, itype: str) -> Dict[str, int]:
-    rows = _read_ws_records("interactions")
-    out: Dict[str, int] = {}
-    did = str(dish_id)
-    it = str(itype)
-    for r in rows:
-        if str(r.get("dish_id", "")) != did:
-            continue
-        if str(r.get("interaction_type", "")) != it:
-            continue
-        v = str(r.get("value", "")).strip()
-        if not v:
-            continue
-        out[v] = out.get(v, 0) + 1
-    return out
-
-
-def top_choice(counts: Dict[str, int]) -> Optional[str]:
-    if not counts:
+def to_float(x) -> Optional[float]:
+    s = norm_text(x).replace("R$", "").replace(".", "").replace(",", ".").strip()
+    if s == "":
         return None
-    return sorted(counts.items(), key=lambda x: x[1], reverse=True)[0][0]
-
-
-def dish_review_counts() -> Dict[str, int]:
-    rows = _read_ws_records("evaluations")
-    out: Dict[str, int] = {}
-    for r in rows:
-        did = str(r.get("dish_id", "")).strip()
-        if not did:
-            continue
-        out[did] = out.get(did, 0) + 1
-    return out
-
-
-def top3_dishes_by_reviews() -> List[str]:
-    counts = dish_review_counts()
-    return [k for k, _ in sorted(counts.items(), key=lambda x: x[1], reverse=True)[:3]]
-
-
-# ===============================
-# MENU (Google Sheets CSV)
-# ===============================
-def _normalize_colname(s: str) -> str:
-    return (s or "").strip().lower()
-
-
-@st.cache_data(ttl=30)
-def load_menu_from_url(menu_url: str) -> List[dict]:
     try:
-        with urllib.request.urlopen(menu_url) as r:
-            content = r.read().decode("utf-8", errors="replace")
-
-        reader = csv.DictReader(io.StringIO(content))
-        if not reader.fieldnames:
-            return []
-
-        field_map = {_normalize_colname(f): f for f in reader.fieldnames if f}
-
-        def get(row: dict, key: str) -> str:
-            real = field_map.get(_normalize_colname(key))
-            if not real:
-                return ""
-            return (row.get(real) or "").strip()
-
-        rows: List[dict] = []
-        for row in reader:
-            rid = get(row, "Id")
-            prato = get(row, "Prato")
-            desc = get(row, "Descrição") or get(row, "Descricao")
-            carne = get(row, "Carne")
-            queijo = get(row, "Queijo")
-            etapa = get(row, "Etapa")
-            ativo = (get(row, "Ativo") or "1").strip()
-            imagem_url = (
-                get(row, "ImagemURL")
-                or get(row, "Imagem Url")
-                or get(row, "Imagem URL")
-                or get(row, "ImagemURL ")
-            )
-
-            if not rid or not prato:
-                continue
-
-            rows.append(
-                {
-                    "Id": rid,
-                    "Prato": prato,
-                    "Descrição": desc,
-                    "Carne": carne,
-                    "Queijo": queijo,
-                    "Etapa": etapa,
-                    "Ativo": ativo,
-                    "ImagemURL": imagem_url,
-                }
-            )
-
-        return [
-            r
-            for r in rows
-            if r["Ativo"] in ("1", "true", "True", "SIM", "Sim", "sim", "ATIVO", "Ativo", "ativo")
-        ]
+        return float(s)
     except Exception:
-        return []
+        return None
 
 
-def load_menu() -> List[dict]:
-    url = get_menu_url()
-    return load_menu_from_url(url)
+def sheet_hash(df: pd.DataFrame) -> str:
+    payload = df.fillna("").astype(str).to_csv(index=False)
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()[:10]
 
 
-def get_dish_image(dish: dict):
-    url = str(dish.get("ImagemURL", "") or "").strip()
-    if url:
-        return fetch_image_bytes(url)
-    return find_image_by_id(str(dish.get("Id", "")))
+def _decode_csv_bytes(raw: bytes) -> str:
+    # Google Sheets frequentemente vem como UTF-8 (às vezes com BOM)
+    for enc in ("utf-8-sig", "utf-8"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            pass
+    # fallback (evita crash, mas o ideal é nunca chegar aqui)
+    return raw.decode("cp1252", errors="replace")
 
 
-# ===============================
-# TEXTO PARA DECISÃO (Explorar)
-# ===============================
-def build_decision_sentence(
-    intention: Optional[str], harmony: Optional[str], axis_label: Optional[str]
-) -> str:
-    if not intention and not harmony and not axis_label:
-        return "Ainda não há avaliações suficientes para orientar sua escolha."
+@st.cache_data(ttl=45)
+def load_csv_from_url(url: str) -> pd.DataFrame:
+    if not url or "docs.google.com/spreadsheets" not in url:
+        raise ValueError("URL inválida ou não configurada.")
 
-    parts: List[str] = []
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
 
-    intent_map = {
-        "Brinde": "Se você quer começar com leveza e clima de celebração, este prato costuma funcionar muito bem.",
-        "Conexão": "Se você quer um prato que favoreça conversa e presença à mesa, este tende a ser uma escolha forte.",
-        "Descoberta": "Se você busca algo diferente, este prato costuma ser percebido como uma boa porta de entrada para descobrir.",
-        "Prazer": "Se você quer prazer imediato e uma escolha fácil de gostar, este prato costuma agradar com facilidade.",
-        "Desacelerar": "Se você quer comer com calma e aproveitar as camadas do prato, este tende a combinar com esse momento.",
-    }
+    # IMPORTANTE: não use r.text (encoding pode ser inferido errado).
+    csv_text = _decode_csv_bytes(r.content)
 
-    if intention:
-        parts.append(intent_map.get(intention, "Este prato ajuda a compor o clima do seu jantar."))
-
-    if harmony:
-        harm_map = {
-            "Equilibrada": "A harmonia foi percebida como equilibrada, com sensação de encaixe natural.",
-            "Contrastante": "A harmonia foi percebida como contrastante, criando alternância de sabores.",
-            "Surpreendente": "A harmonia foi percebida como surpreendente, com efeito claro de descoberta.",
-            "Provocativa": "A harmonia foi percebida como provocativa, para quem gosta de escolhas com personalidade.",
-        }
-        parts.append(harm_map.get(harmony, "A harmonia foi percebida como consistente para o perfil do prato."))
-
-    if axis_label:
-        axis_map = {
-            "Clássico e Sutil": "O perfil foi descrito como clássico e sutil, elegante e sem exagero.",
-            "Clássico e Marcante": "O perfil foi descrito como clássico e marcante, com presença e assinatura clara.",
-            "Fora do obvio e Sutil": "O perfil foi descrito como fora do obvio e sutil, diferente sem chocar.",
-            "Fora do obvio e Marcante": "O perfil foi descrito como fora do obvio e marcante, com impacto.",
-        }
-        parts.append(axis_map.get(axis_label, "O perfil do prato foi descrito de forma consistente."))
-
-    return " ".join(parts)
+    # dtype=str e keep_default_na=False evitam NaN quebrando textos
+    return pd.read_csv(io.StringIO(csv_text), dtype=str, keep_default_na=False)
 
 
-# ===============================
-# VISUAL
-# ===============================
-def inject_css() -> None:
+def make_key_for_pratos(prato_ids: List[str]) -> str:
+    ids_sorted = sorted([norm_text(x) for x in prato_ids if norm_text(x)])
+    return "|".join(ids_sorted)
+
+
+def is_wine_available_now(w: Dict) -> bool:
+    ativo = to_int(w.get("ativo", w.get("active", 0)), 0)
+    est = to_int(w.get("estoque", 0), 0)
+    return ativo == 1 and est > 0
+
+
+def set_page_style():
+    st.set_page_config(
+        page_title=APP_TITLE,
+        page_icon="🍷",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
     st.markdown(
         f"""
         <style>
         .stApp {{
-            background: {COLOR_CREAM};
+            background: {BRAND_BG};
         }}
-        .yv-card {{
-            background: rgba(255,255,255,0.75);
-            border-radius: 22px;
-            padding: 16px;
-            margin-bottom: 16px;
+        h1, h2, h3, h4 {{
+            color: {BRAND_BLUE};
+        }}
+        .yvora-subtitle {{
+            color: {BRAND_MUTED};
+            font-size: 1.05rem;
+            margin-top: -8px;
+        }}
+        .yvora-card {{
+            background: {BRAND_CARD};
+            border-radius: 16px;
+            padding: 18px 18px;
+            border: 1px solid rgba(14,42,71,0.10);
+        }}
+        .yvora-warn {{
+            background: {BRAND_WARN};
+            border-radius: 12px;
+            padding: 14px 16px;
             border: 1px solid rgba(14,42,71,0.08);
         }}
-        .yv-title {{
-            font-weight: 900;
-            color: {COLOR_NAVY};
-            font-size: 28px;
-            line-height: 1.05;
-        }}
-        .yv-sub {{
-            color: rgba(11,34,56,0.70);
-            font-size: 13px;
-            margin-top: 6px;
-        }}
-        .yv-h {{
-            font-weight: 900;
-            color: {COLOR_INK};
-            font-size: 18px;
-            margin-top: 6px;
-        }}
-        .yv-p {{
-            color: rgba(11,34,56,0.72);
-            font-size: 13px;
-            margin-top: 4px;
+        .yvora-pill {{
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(14,42,71,0.20);
+            color: {BRAND_BLUE};
+            font-size: 0.85rem;
+            margin-right: 6px;
+            background: rgba(255,255,255,0.50);
         }}
         </style>
         """,
@@ -733,304 +297,297 @@ def inject_css() -> None:
     )
 
 
-def render_header() -> None:
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        if os.path.exists(ROOT_LOGO_PATH):
-            st.image(ROOT_LOGO_PATH, use_container_width=True)
-        elif os.path.exists(LOGO_PATH):
-            st.image(LOGO_PATH, use_container_width=True)
-        else:
-            st.markdown(
-                f"<div style='font-weight:900;color:{COLOR_NAVY};font-size:18px'>YVORA</div>",
-                unsafe_allow_html=True,
-            )
-    with col2:
-        st.markdown(
-            "<div class='yv-title'>Cardápio Sensorial</div>"
-            "<div class='yv-sub'>Guia de escolha dos pratos orientado pela percepção do público</div>",
-            unsafe_allow_html=True,
-        )
-    st.divider()
+def sidebar_brand():
+    with st.sidebar:
+        render_logo(use_container_width=True)
+        st.caption("YVORA - Meat & Cheese Lab")
 
 
-# ===============================
-# SIDEBAR
-# ===============================
-def render_sidebar() -> str:
-    st.sidebar.markdown("## Acesso")
-    current_page = st.session_state.get("page", "Explorar")
+def dm_login_block() -> bool:
+    admin_password = _get_secret("ADMIN_PASSWORD", "")
+    if "dm" not in st.session_state:
+        st.session_state.dm = False
 
-    st.sidebar.markdown("### Ir para")
+    with st.sidebar:
+        st.markdown("### Acesso DM")
 
-    if "nav_choice" not in st.session_state:
-        st.session_state["nav_choice"] = "Explorar"
-    if "nav_choice_prev" not in st.session_state:
-        st.session_state["nav_choice_prev"] = st.session_state["nav_choice"]
+        # [AJUSTE PONTUAL] Restringe o login DM ao IP do restaurante quando a regra estiver configurada
+        # Não muda o resto da lógica: apenas bloqueia o botão Entrar fora do IP permitido.
+        ip_rule_on = bool(norm_text(_get_secret("RESTAURANT_ALLOWED_IP_RANGES", "")))
+        allowed_here = is_restaurant_ip_allowed()
 
-    st.sidebar.radio(
-        "Navegação",
-        ["Explorar", "Avaliar"],
-        index=0 if st.session_state["nav_choice"] == "Explorar" else 1,
-        label_visibility="collapsed",
-        key="nav_choice",
-    )
+        if ip_rule_on and not allowed_here and not st.session_state.dm:
+            st.error("Acesso DM permitido apenas na rede do restaurante.")
+            st.caption(f"IP detectado: {safe_client_ip() or 'indisponível'}")
+            return False
 
-    if current_page == "Admin":
-        if st.session_state["nav_choice"] != st.session_state["nav_choice_prev"]:
-            st.session_state["page"] = st.session_state["nav_choice"]
-            current_page = st.session_state["page"]
-    else:
-        st.session_state["page"] = st.session_state["nav_choice"]
-        current_page = st.session_state["page"]
-
-    st.session_state["nav_choice_prev"] = st.session_state["nav_choice"]
-
-    st.sidebar.divider()
-    st.sidebar.markdown("## Admin")
-
-    admin_pw = _safe_get_admin_password()
-    is_admin = bool(st.session_state.get("is_admin", False))
-
-    if is_admin:
-        st.sidebar.success("Admin autenticado.")
-        if st.sidebar.button("Sair do Admin"):
-            st.session_state["is_admin"] = False
-            st.session_state["page"] = "Explorar"
-            st.session_state["nav_choice"] = "Explorar"
-            st.session_state["nav_choice_prev"] = "Explorar"
-            st.rerun()
-
-        if st.sidebar.button("Ir para Admin"):
-            st.session_state["page"] = "Admin"
-            st.rerun()
-
-    else:
-        if not admin_pw:
-            st.sidebar.info(_admin_config_message())
-
-        pw_in = st.sidebar.text_input("Senha", type="password", key="admin_pw_input")
-
-        if st.sidebar.button("Entrar"):
-            admin_pw_now = _safe_get_admin_password()
-            if not admin_pw_now:
-                st.sidebar.error("Defina a senha em Secrets para habilitar o Admin.")
-            elif (pw_in or "") == admin_pw_now:
-                st.session_state["is_admin"] = True
-                st.session_state["page"] = "Admin"
+        if st.session_state.dm:
+            st.success("Modo DM ativo")
+            if st.button("Sair do DM", use_container_width=True):
+                st.session_state.dm = False
                 st.rerun()
-            else:
-                st.sidebar.error("Senha incorreta.")
+        else:
+            pwd = st.text_input("Senha", type="password", placeholder="Digite a senha do DM")
+            if st.button("Entrar", use_container_width=True):
+                if pwd and admin_password and pwd == admin_password:
+                    st.session_state.dm = True
+                    st.rerun()
+                else:
+                    st.error("Senha inválida.")
 
-    return st.session_state.get("page", "Explorar")
+    return bool(st.session_state.dm)
 
 
-# ===============================
-# TELAS
-# ===============================
-def explore_screen(menu: List[dict]) -> None:
-    msg = st.session_state.pop("flash_success", None)
-    if msg:
-        st.success(str(msg))
-
-    if not menu:
-        st.warning("Sem itens ativos no menu. Verifique o Google Sheets e a coluna Ativo.")
-        return
-
-    top3 = top3_dishes_by_reviews()
-    rank_map = {dish_id: (i + 1) for i, dish_id in enumerate(top3)}
-
-    etapas = sorted({m.get("Etapa", "") for m in menu if m.get("Etapa", "")})
-    etapa = st.selectbox("Etapa do menu", ["Todas"] + etapas)
-
-    for dish in menu:
-        if etapa != "Todas" and dish.get("Etapa") != etapa:
-            continue
-
-        st.markdown("<div class='yv-card'>", unsafe_allow_html=True)
-
-        img = get_dish_image(dish)
-        if img:
-            st.image(img, use_container_width=True)
-
-        if dish["Id"] in rank_map:
-            if rank_map[dish["Id"]] == 1:
-                st.caption("👑 Top 1")
-            elif rank_map[dish["Id"]] == 2:
-                st.caption("👑 Top 2")
-            else:
-                st.caption("👑 Top 3")
-
-        st.markdown(f"<div class='yv-h'>{dish['Prato']}</div>", unsafe_allow_html=True)
-        if dish.get("Descrição"):
-            st.markdown(f"<div class='yv-p'>{dish.get('Descrição')}</div>", unsafe_allow_html=True)
-
-        meta = []
-        if dish.get("Etapa"):
-            meta.append(dish["Etapa"])
-        if dish.get("Carne"):
-            meta.append(f"Carne: {dish['Carne']}")
-        if dish.get("Queijo"):
-            meta.append(f"Queijo: {dish['Queijo']}")
-        if meta:
-            st.caption(" | ".join(meta))
-
-        intent = top_choice(fetch_counts(dish["Id"], "intention"))
-        harm = top_choice(fetch_counts(dish["Id"], "harmony"))
-        axis = top_choice(fetch_counts(dish["Id"], "axis"))
-
-        frase = build_decision_sentence(intent, harm, axis)
+def header_area():
+    col1, col2 = st.columns([1, 3], vertical_alignment="center")
+    with col1:
+        render_logo(width=120)
+    with col2:
+        st.markdown("# Wine Pairing")
         st.markdown(
-            f"<div class='yv-p'><b>Percepção predominante do público</b><br>{frase}</div>",
+            "<div class='yvora-subtitle'>Harmonização de vinhos com carnes e queijos, no padrão YVORA.</div>",
             unsafe_allow_html=True,
         )
 
-        st.markdown("</div>", unsafe_allow_html=True)
+
+def load_all_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    menu_url = _get_secret("MENU_SHEET_URL", "")
+    wines_url = _get_secret("WINES_SHEET_URL", "")
+    pairings_url = _get_secret("PAIRINGS_SHEET_URL", "")
+
+    if not menu_url:
+        raise ValueError("MENU_SHEET_URL não configurado.")
+    if not wines_url:
+        raise ValueError("WINES_SHEET_URL não configurado.")
+    if not pairings_url:
+        raise ValueError("PAIRINGS_SHEET_URL não configurado.")
+
+    menu_df = normalize_cols(load_csv_from_url(menu_url))
+    wines_df = normalize_cols(load_csv_from_url(wines_url))
+    pair_df = normalize_cols(load_csv_from_url(pairings_url))
+    return menu_df, wines_df, pair_df
 
 
-def _rate_limit_ok() -> Tuple[bool, int]:
-    now = int(datetime.now().timestamp())
-    last = int(st.session_state.get("last_submit_ts", 0))
-    delta = now - last
-    if delta < RATE_LIMIT_SECONDS:
-        return False, RATE_LIMIT_SECONDS - delta
-    return True, 0
+def standardize_menu(menu_df: pd.DataFrame) -> pd.DataFrame:
+    df = menu_df.copy()
+
+    def pick(opts: List[str]) -> str:
+        for c in opts:
+            if c in df.columns:
+                return c
+        return ""
+
+    c_id = pick(["id_prato", "id", "prato_id"])
+    c_nome = pick(["nome_prato", "prato", "nome", "title"])
+    c_desc = pick(["descricao_prato", "descricao", "descrição", "desc"])
+    c_ativo = pick(["ativo", "active", "status"])
+
+    if "id" in df.columns and not c_id:
+        c_id = "id"
+    if "prato" in df.columns and not c_nome:
+        c_nome = "prato"
+    if "descrição" in df.columns and not c_desc:
+        c_desc = "descrição"
+
+    out = pd.DataFrame()
+    out["id_prato"] = df[c_id] if c_id else ""
+    out["nome_prato"] = df[c_nome] if c_nome else ""
+    out["descricao_prato"] = df[c_desc] if c_desc else ""
+    out["ativo"] = df[c_ativo] if c_ativo else "1"
+
+    out["id_prato"] = out["id_prato"].apply(norm_text)
+    out["nome_prato"] = out["nome_prato"].apply(norm_text)
+    out["descricao_prato"] = out["descricao_prato"].apply(norm_text)
+    out["ativo"] = out["ativo"].apply(lambda x: 1 if norm_text(x).lower() in ["1", "1.0", "true", "sim"] else 0)
+
+    m = out["id_prato"].eq("")
+    out.loc[m, "id_prato"] = out.loc[m, "nome_prato"]
+
+    out = out[(out["nome_prato"] != "") & (out["ativo"] == 1)].copy()
+    return out.drop_duplicates(subset=["id_prato", "nome_prato"])
 
 
-def evaluate_screen(menu: List[dict]) -> None:
-    if not _client_ip_allowed():
-        st.error("A avaliação está disponível apenas para conexões autorizadas do restaurante.")
-        st.stop()
+def standardize_wines(wines_df: pd.DataFrame) -> pd.DataFrame:
+    df = wines_df.copy()
 
-    if not menu:
-        st.warning("Sem itens ativos no menu. Verifique o Google Sheets e a coluna Ativo.")
-        return
+    def pick(opts: List[str]) -> str:
+        for c in opts:
+            if c in df.columns:
+                return c
+        return ""
 
-    dish_names = [m["Prato"] for m in menu]
-    selected = st.selectbox("Escolha o prato", dish_names, key="dish_select")
-    dish = next(m for m in menu if m["Prato"] == selected)
+    c_id = pick(["wine_id", "id_vinho", "id", "vinho_id"])
+    c_nome = pick(["wine_name", "nome_vinho", "vinho", "nome"])
+    c_price = pick(["price", "preco", "preço", "valor"])
+    c_stock = pick(["estoque", "stock", "qtd", "quantidade"])
+    c_active = pick(["active", "ativo", "status"])
 
-    st.markdown("<div class='yv-card'>", unsafe_allow_html=True)
-
-    img = get_dish_image(dish)
-    if img:
-        st.image(img, use_container_width=True)
-
-    st.markdown(f"<div class='yv-h'>{dish['Prato']}</div>", unsafe_allow_html=True)
-    if dish.get("Descrição"):
-        st.markdown(f"<div class='yv-p'>{dish.get('Descrição')}</div>", unsafe_allow_html=True)
-
-    st.subheader("1) Que tipo de experiência combina mais com este prato?")
-    intention = st.radio("Intenção", INTENTIONS, horizontal=True, label_visibility="collapsed", key="q_intention")
-    st.caption(f"Significado: {INTENT_DESC[intention]}")
-
-    st.subheader("2) Como você descreve o perfil do prato?")
-    axis_label = st.radio("Perfil", AXIS_LABELS, horizontal=True, label_visibility="collapsed", key="q_axis")
-    st.caption(f"Significado: {AXIS_DESC[axis_label]}")
-
-    st.subheader("3) Como foi a harmonia entre carne e queijo?")
-    harmony = st.radio("Harmonia", HARMONIES, horizontal=True, label_visibility="collapsed", key="q_harmony")
-    st.caption(f"Significado: {HARM_DESC[harmony]}")
-
-    st.divider()
-
-    st.subheader("Seus dados")
-    col1, col2 = st.columns(2)
-    with col1:
-        name = st.text_input("Nome", key="user_name")
-    with col2:
-        phone = st.text_input("Telefone (WhatsApp)", key="user_phone")
-
-    consent = st.checkbox(
-        "Aceito receber promoções e ofertas especiais exclusivas neste número, conforme a Lei Geral de Proteção de Dados.",
-        value=True,
-        key="user_consent",
+    out = pd.DataFrame()
+    out["id_vinho"] = df[c_id] if c_id else ""
+    out["nome_vinho"] = df[c_nome] if c_nome else ""
+    out["preco_num"] = df[c_price].apply(to_float) if c_price else None
+    out["estoque"] = df[c_stock].apply(lambda x: to_int(x, 0)) if c_stock else 0
+    out["ativo"] = (
+        df[c_active].apply(lambda x: 1 if norm_text(x).lower() in ["1", "1.0", "true", "sim"] else 0) if c_active else 0
     )
 
-    if "session_voted_dishes" not in st.session_state:
-        st.session_state["session_voted_dishes"] = set()
+    out["id_vinho"] = out["id_vinho"].apply(norm_text)
+    out["nome_vinho"] = out["nome_vinho"].apply(norm_text)
+    m = out["id_vinho"].eq("")
+    out.loc[m, "id_vinho"] = out.loc[m, "nome_vinho"]
 
-    if st.button("Enviar avaliação", key="btn_submit_eval"):
-        if not name.strip() or not normalize_phone(phone):
-            st.error("Preencha Nome e Telefone corretamente para registrar a avaliação.")
-        else:
-            ok_rl, wait_s = _rate_limit_ok()
-            if not ok_rl:
-                st.warning(f"Aguarde {wait_s}s para enviar outra avaliação.")
-            else:
-                did = str(dish["Id"])
-                if did in st.session_state["session_voted_dishes"] and not ALLOW_DUPLICATE_SAME_DISH_PER_DAY:
-                    st.warning("Você já avaliou este prato nesta sessão. Obrigado.")
-                else:
-                    ok, msg = save_evaluation(
-                        dish_id=did,
-                        dish_name=str(dish["Prato"]),
-                        user_name=name.strip(),
-                        user_phone=phone,
-                        consent_marketing=bool(consent),
-                        intention=intention,
-                        axis_label=axis_label,
-                        harmony=harmony,
-                        client_ip=safe_client_ip(),
-                        user_agent=safe_user_agent(),
-                    )
-                    if ok:
-                        st.session_state["session_voted_dishes"].add(did)
-                        st.session_state["last_submit_ts"] = int(datetime.now().timestamp())
+    return out[out["nome_vinho"] != ""].drop_duplicates(subset=["id_vinho", "nome_vinho"])
 
-                        st.session_state["flash_success"] = msg
-                        st.session_state["goto_page"] = "Explorar"
-                        st.rerun()
-                    else:
-                        st.warning(msg)
+
+def standardize_pairings(pair_df: pd.DataFrame) -> pd.DataFrame:
+    p = pair_df.copy()
+    for c in ["chave_pratos", "id_vinho", "nome_vinho", "rotulo_valor"]:
+        if c not in p.columns:
+            p[c] = ""
+    if "ativo" in p.columns:
+        p["ativo"] = p["ativo"].apply(lambda x: 1 if norm_text(x).lower() in ["1", "1.0", "true", "sim"] else 0)
+    else:
+        p["ativo"] = 1
+    return p[p["ativo"] == 1].copy()
+
+
+def render_recos_block(title: str, p_subset: pd.DataFrame):
+    st.markdown("<div class='yvora-card'>", unsafe_allow_html=True)
+    st.markdown(f"#### {title}")
+
+    order = {"$$$": 0, "$$": 1, "$": 2}
+    p_subset = p_subset.copy()
+    p_subset["ord"] = p_subset["rotulo_valor"].apply(lambda x: order.get(norm_text(x), 9))
+    p_subset = p_subset.sort_values(["ord", "nome_vinho"], ascending=True).head(3)
+
+    for _, row in p_subset.iterrows():
+        rot = norm_text(row.get("rotulo_valor", "$")) or "$"
+        nome_vinho = norm_text(row.get("nome_vinho", ""))
+
+        st.markdown(f"<span class='yvora-pill'>{rot}</span>", unsafe_allow_html=True)
+        st.markdown(f"**{nome_vinho}**")
+
+        frase = norm_text(row.get("frase_mesa", ""))
+        if frase:
+            st.write(frase)
+
+        por_vale = norm_text(row.get("por_que_vale", ""))
+        if por_vale:
+            st.caption(por_vale)
+
+        with st.expander("Ver detalhes técnicos"):
+            pc = norm_text(row.get("por_que_carne", ""))
+            pq = norm_text(row.get("por_que_queijo", ""))
+            pcombo = norm_text(row.get("por_que_combo", ""))
+            if pc:
+                st.write(f"**Carne/ingrediente:** {pc}")
+            if pq:
+                st.write(f"**Queijo:** {pq}")
+            if pcombo:
+                st.write(f"**Conjunto:** {pcombo}")
+
+        st.divider()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def admin_reports_screen(menu: List[dict]) -> None:
-    if not st.session_state.get("is_admin"):
-        st.warning("Acesso restrito. Entre como Admin na barra lateral.")
+def render_client(menu: pd.DataFrame, wines: pd.DataFrame, pairings: pd.DataFrame):
+    st.markdown("## Escolha seus pratos")
+    st.markdown(
+        "<div class='yvora-subtitle'>Selecione 1 ou 2 pratos. As sugestões são filtradas pelo estoque atualizado no momento da consulta.</div>",
+        unsafe_allow_html=True,
+    )
+    st.write("")
+
+    selected_names = st.multiselect(
+        "Selecione 1 ou 2 pratos",
+        options=menu["nome_prato"].tolist(),
+        max_selections=2,
+        placeholder="Digite para buscar no menu",
+    )
+
+    if not selected_names:
+        st.info("Selecione ao menos 1 prato para ver as sugestões.")
         return
 
-    st.subheader("Relatórios")
-    st.caption("Tela de Admin mantida conforme estrutura atual.")
-    st.info("Se você quiser evoluir esta página com ranking, filtros e exportação, eu adapto sem mudar a navegação.")
+    selected = menu[menu["nome_prato"].isin(selected_names)].copy()
+    selected_ids = selected["id_prato"].tolist()
+
+    wines_dict = wines.to_dict(orient="records")
+    available_ids = set([w["id_vinho"] for w in wines_dict if is_wine_available_now(w)])
+
+    if len(selected_ids) == 2:
+        key_pair = make_key_for_pratos(selected_ids)
+        p_pair = pairings[pairings["chave_pratos"].astype(str).str.strip() == key_pair].copy()
+        p_pair = p_pair[p_pair["id_vinho"].isin(available_ids)].copy()
+
+        if p_pair.empty:
+            st.markdown(
+                "<div class='yvora-warn'><b>Sem recomendação para o conjunto agora.</b><br>Esta combinação ainda não foi gerada ou os vinhos sugeridos estão sem estoque.</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            render_recos_block("Para os 2 pratos (equilíbrio do conjunto)", p_pair)
+
+        st.write("")
+
+    st.markdown("### Melhor por prato")
+    for pid in selected_ids:
+        key_single = make_key_for_pratos([pid])
+        p_one = pairings[pairings["chave_pratos"].astype(str).str.strip() == key_single].copy()
+        p_one = p_one[p_one["id_vinho"].isin(available_ids)].copy()
+
+        prato_nome = menu[menu["id_prato"] == pid]["nome_prato"].iloc[0]
+
+        if p_one.empty:
+            st.markdown(
+                f"<div class='yvora-warn'><b>{prato_nome}:</b> sem sugestão disponível agora.</div>",
+                unsafe_allow_html=True,
+            )
+            continue
+
+        render_recos_block(prato_nome, p_one)
 
 
-# ===============================
-# MAIN
-# ===============================
-def main() -> None:
-    st.set_page_config(page_title=APP_TITLE, page_icon="🍽️", layout="wide")
-    ensure_dirs()
+def render_dm(menu: pd.DataFrame, wines: pd.DataFrame, pairings: pd.DataFrame):
+    st.markdown("## DM")
+    st.markdown(
+        "<div class='yvora-subtitle'>Diagnóstico rápido de dados e cobertura de recomendações.</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.write(f"Menu hash: `{sheet_hash(menu)}`")
+    st.write(f"Vinhos hash: `{sheet_hash(wines)}`")
+    st.write(f"Pairings hash: `{sheet_hash(pairings)}`")
+
+    wines_dict = wines.to_dict(orient="records")
+    available_ids = set([w["id_vinho"] for w in wines_dict if is_wine_available_now(w)])
+    st.write(f"Vinhos disponíveis agora: **{len(available_ids)}**")
+    st.write(f"Linhas de pairings ativas: **{len(pairings)}**")
+
+
+def main():
+    set_page_style()
+    sidebar_brand()
+    dm = dm_login_block()
+    header_area()
 
     try:
-        _ = _ws_handles()
+        menu_df, wines_df, pair_df = load_all_data()
+        menu = standardize_menu(menu_df)
+        wines = standardize_wines(wines_df)
+        pairings = standardize_pairings(pair_df)
     except Exception as e:
-        st.error(f"Erro de configuração do Google Sheets: {e}")
+        st.markdown(
+            f"<div class='yvora-warn'><b>Erro ao carregar dados:</b><br>{e}</div>",
+            unsafe_allow_html=True,
+        )
         st.stop()
 
-    goto = st.session_state.pop("goto_page", None)
-    if goto in ("Explorar", "Avaliar", "Admin"):
-        if goto in ("Explorar", "Avaliar"):
-            st.session_state["nav_choice"] = goto
-            st.session_state["nav_choice_prev"] = goto
-            st.session_state["page"] = goto
-        else:
-            st.session_state["page"] = "Admin"
-
-    inject_css()
-    render_header()
-
-    menu = load_menu()
-    page = render_sidebar()
-
-    if page == "Explorar":
-        explore_screen(menu)
-    elif page == "Avaliar":
-        evaluate_screen(menu)
+    if dm:
+        render_dm(menu, wines, pairings)
     else:
-        admin_reports_screen(menu)
+        render_client(menu, wines, pairings)
 
 
 if __name__ == "__main__":
