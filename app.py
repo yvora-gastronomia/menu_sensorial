@@ -110,13 +110,72 @@ def iso_now_seconds() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+# ===============================
+# IP E USER AGENT (SOLUÇÃO DEFINITIVA)
+# ===============================
+def _is_valid_ip(s: str) -> bool:
+    try:
+        ipaddress.ip_address(s)
+        return True
+    except Exception:
+        return False
+
+
+def _first_ip_from_xff(xff: str) -> str:
+    """
+    X-Forwarded-For pode vir como: "client_ip, proxy1, proxy2"
+    A regra correta é pegar o primeiro IP válido.
+    """
+    if not xff:
+        return ""
+    parts = [p.strip() for p in xff.split(",") if p.strip()]
+    for p in parts:
+        if _is_valid_ip(p):
+            return p
+    return ""
+
+
 def safe_client_ip() -> str:
-    # Em Streamlit Cloud, pegar IP real do cliente não é confiável via app puro
+    """
+    Captura o IP do cliente pelo contexto do Streamlit (headers).
+    Isso funciona no Streamlit Cloud porque ele coloca o IP público do usuário em headers.
+    """
+    headers = {}
+    try:
+        # Streamlit recente
+        headers = dict(getattr(st, "context").headers)  # type: ignore[attr-defined]
+    except Exception:
+        headers = {}
+
+    # Normaliza chaves para lower
+    h = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+
+    # Prioridade comum em reverse proxies
+    xff = h.get("x-forwarded-for", "")
+    ip = _first_ip_from_xff(xff)
+    if ip:
+        return ip
+
+    xri = h.get("x-real-ip", "").strip()
+    if _is_valid_ip(xri):
+        return xri
+
+    cfi = h.get("cf-connecting-ip", "").strip()
+    if _is_valid_ip(cfi):
+        return cfi
+
+    # Se nada vier, retorna vazio (vai bloquear quando houver allowlist)
     return ""
 
 
 def safe_user_agent() -> str:
-    return ""
+    headers = {}
+    try:
+        headers = dict(getattr(st, "context").headers)  # type: ignore[attr-defined]
+    except Exception:
+        headers = {}
+    h = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+    return (h.get("user-agent", "") or "")[:500]
 
 
 # ===============================
