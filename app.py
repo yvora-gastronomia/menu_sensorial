@@ -110,73 +110,61 @@ def iso_now_seconds() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-# ===============================
-# IP E USER AGENT (SOLUÇÃO DEFINITIVA)
-# ===============================
-def _is_valid_ip(s: str) -> bool:
+def _get_request_headers() -> Dict[str, str]:
+    """Best-effort access to request headers.
+
+    Streamlit Cloud/proxies usually forward client IP via headers like:
+    - X-Forwarded-For
+    - X-Real-IP
+    - CF-Connecting-IP (Cloudflare)
+    """
     try:
-        ipaddress.ip_address(s)
-        return True
+        ctx = getattr(st, "context", None)
+        if ctx is not None and hasattr(ctx, "headers") and ctx.headers:
+            # ctx.headers behaves like a Mapping (case-insensitive)
+            return {str(k): str(v) for k, v in dict(ctx.headers).items()}
     except Exception:
-        return False
-
-
-def _first_ip_from_xff(xff: str) -> str:
-    """
-    X-Forwarded-For pode vir como: "client_ip, proxy1, proxy2"
-    A regra correta é pegar o primeiro IP válido.
-    """
-    if not xff:
-        return ""
-    parts = [p.strip() for p in xff.split(",") if p.strip()]
-    for p in parts:
-        if _is_valid_ip(p):
-            return p
-    return ""
-
+        pass
+    return {}
 
 def safe_client_ip() -> str:
-    """
-    Captura o IP do cliente pelo contexto do Streamlit (headers).
-    Isso funciona no Streamlit Cloud porque ele coloca o IP público do usuário em headers.
-    """
-    headers = {}
-    try:
-        # Streamlit recente
-        headers = dict(getattr(st, "context").headers)  # type: ignore[attr-defined]
-    except Exception:
-        headers = {}
+    """Return best-effort client IP (public) when running behind Streamlit Cloud/proxies."""
+    headers = _get_request_headers()
+    if not headers:
+        return ""
 
-    # Normaliza chaves para lower
-    h = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+    # normalize keys (case-insensitive)
+    h = {k.lower(): v for k, v in headers.items()}
 
-    # Prioridade comum em reverse proxies
-    xff = h.get("x-forwarded-for", "")
-    ip = _first_ip_from_xff(xff)
-    if ip:
-        return ip
+    # Prefer Cloudflare / reverse proxy signals
+    candidates = []
+    if "cf-connecting-ip" in h:
+        candidates.append(h.get("cf-connecting-ip", ""))
+    if "x-real-ip" in h:
+        candidates.append(h.get("x-real-ip", ""))
+    if "x-forwarded-for" in h:
+        # may contain "client, proxy1, proxy2"
+        xff = h.get("x-forwarded-for", "")
+        if xff:
+            candidates.append(xff.split(",")[0].strip())
 
-    xri = h.get("x-real-ip", "").strip()
-    if _is_valid_ip(xri):
-        return xri
-
-    cfi = h.get("cf-connecting-ip", "").strip()
-    if _is_valid_ip(cfi):
-        return cfi
-
-    # Se nada vier, retorna vazio (vai bloquear quando houver allowlist)
+    for c in candidates:
+        ip = (c or "").strip()
+        if not ip:
+            continue
+        try:
+            ipaddress.ip_address(ip)
+            return ip
+        except Exception:
+            continue
     return ""
 
-
 def safe_user_agent() -> str:
-    headers = {}
-    try:
-        headers = dict(getattr(st, "context").headers)  # type: ignore[attr-defined]
-    except Exception:
-        headers = {}
-    h = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
-    return (h.get("user-agent", "") or "")[:500]
-
+    headers = _get_request_headers()
+    if not headers:
+        return ""
+    h = {k.lower(): v for k, v in headers.items()}
+    return str(h.get("user-agent", "")).strip()
 
 # ===============================
 # IMAGENS (SOLUÇÃO DEFINITIVA)
