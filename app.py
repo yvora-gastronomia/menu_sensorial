@@ -5,7 +5,8 @@ import csv
 import hashlib
 import urllib.request
 import ipaddress
-from datetime import datetime, date
+import time
+from datetime import datetime, date, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
@@ -48,9 +49,10 @@ DEFAULT_WS_SETTINGS = "settings"
 RATE_LIMIT_SECONDS = 20
 ALLOW_DUPLICATE_SAME_DISH_PER_DAY = False
 
-# Bloqueio definitivo anti flood no backend (janela curta)
-# Se o mesmo user_hash enviar qualquer avaliação dentro desta janela, bloqueia.
-ANTI_FLOOD_WINDOW_SECONDS = 30
+# CONTROLES ANTI ABUSO (camadas)
+SUBMIT_LOCK_SECONDS = 8            # trava o botao por sessao apos clique
+DISH_RATE_LIMIT_MINUTES = 10       # AJUSTE: 1 avaliacao por prato por telefone dentro da janela de 10 minutos
+REQUEST_BUCKET_SECONDS = 30        # dedupe forte: mesmo prato + user_hash no mesmo bucket nao grava 2x
 
 
 # ===============================
@@ -156,6 +158,7 @@ def _to_github_raw(url: str) -> str:
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_image_bytes(url: str) -> Optional[bytes]:
     """
+    Solução definitiva:
     Baixa a imagem no backend e retorna bytes.
     Isso evita o problema do Google Drive servir HTML, viewer, confirmações e redirects que quebram o <img>.
     """
@@ -382,6 +385,8 @@ def _ws_handles():
             "harmony",
             "client_ip",
             "user_agent",
+            # ADICIONADO: dedupe e anti abuso (compatível via header append)
+            "request_id",
         ],
     )
 
@@ -408,19 +413,6 @@ def _ws_handles():
 
 @st.cache_data(ttl=15)
 def _read_ws_records(kind: str) -> List[dict]:
-    # Mantém cache para telas e métricas, mas NAO deve ser usado para validação de envio
-    ws = _ws_handles()[kind]
-    try:
-        return ws.get_all_records()
-    except Exception:
-        return []
-
-
-def _read_ws_records_live(kind: str) -> List[dict]:
-    """
-    LEITURA AO VIVO (sem cache).
-    Usar sempre para bloquear duplicidade e anti flood no envio.
-    """
     ws = _ws_handles()[kind]
     try:
         return ws.get_all_records()
@@ -481,65 +473,6 @@ def save_interaction(dish_id: str, user_hash: str, itype: str, value: str) -> No
     _clear_ws_cache()
 
 
-def _parse_iso_dt(s: str) -> Optional[datetime]:
-    s = (s or "").strip()
-    if not s:
-        return None
-    try:
-        # created_at é isoformat(timespec="seconds")
-        return datetime.fromisoformat(s)
-    except Exception:
-        return None
-
-
-def _anti_flood_ok_live(user_hash: str, dish_id: str) -> Tuple[bool, int]:
-    """
-    Bloqueio anti flood real no backend:
-    - lê evaluations AO VIVO
-    - se existe qualquer avaliação do mesmo user_hash nos últimos ANTI_FLOOD_WINDOW_SECONDS, bloqueia
-    - adicionalmente, protege contra repetição do mesmo prato na mesma janela
-    """
-    rows = _read_ws_records_live("evaluations")
-    now = datetime.now()
-    uhash = str(user_hash).strip()
-    did = str(dish_id).strip()
-
-    best_wait = 0
-
-    for r in rows:
-        if str(r.get("user_hash", "")).strip() != uhash:
-            continue
-        dt = _parse_iso_dt(str(r.get("created_at", "")).strip())
-        if not dt:
-            continue
-        age = (now - dt).total_seconds()
-        if age < 0:
-            continue
-        if age < ANTI_FLOOD_WINDOW_SECONDS:
-            wait = int(ANTI_FLOOD_WINDOW_SECONDS - age)
-            if wait > best_wait:
-                best_wait = wait
-
-    if best_wait > 0:
-        return False, best_wait
-
-    # (Opcional, já coberto acima, mas mantém sem mudar a lógica existente)
-    for r in rows:
-        if str(r.get("user_hash", "")).strip() != uhash:
-            continue
-        if str(r.get("dish_id", "")).strip() != did:
-            continue
-        dt = _parse_iso_dt(str(r.get("created_at", "")).strip())
-        if not dt:
-            continue
-        age = (now - dt).total_seconds()
-        if age < ANTI_FLOOD_WINDOW_SECONDS:
-            wait = int(ANTI_FLOOD_WINDOW_SECONDS - age)
-            return False, wait
-
-    return True, 0
-
-
 def already_voted_today(dish_id: str, user_hash: str) -> bool:
     if ALLOW_DUPLICATE_SAME_DISH_PER_DAY:
         return False
@@ -548,8 +481,7 @@ def already_voted_today(dish_id: str, user_hash: str) -> bool:
     uhash = str(user_hash).strip()
     today = date.today().isoformat()
 
-    # LEITURA AO VIVO para não depender de cache
-    rows = _read_ws_records_live("evaluations")
+    rows = _read_ws_records("evaluations")
     for r in rows:
         if str(r.get("dish_id", "")).strip() != did:
             continue
@@ -557,6 +489,72 @@ def already_voted_today(dish_id: str, user_hash: str) -> bool:
             continue
         created_at = str(r.get("created_at", "")).strip()
         if created_at[:10] == today:
+            return True
+    return False
+
+
+# ===============================
+# ANTI ABUSO (NOVO - PONTUAL)
+# ===============================
+def _parse_iso_dt(s: str) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _make_request_id(user_hash: str, dish_id: str) -> str:
+    bucket = int(time.time() // REQUEST_BUCKET_SECONDS)
+    raw = f"{str(user_hash).strip()}|{str(dish_id).strip()}|{bucket}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _rate_limit_same_dish_rows(dish_id: str, user_hash: str) -> Tuple[bool, str]:
+    """
+    Limite por prato + usuario (telefone hash) dentro de uma janela curta.
+    """
+    rows = _read_ws_records("evaluations")
+    if not rows:
+        return True, ""
+
+    did = str(dish_id).strip()
+    uhash = str(user_hash).strip()
+
+    last_dt: Optional[datetime] = None
+    for r in rows:
+        if str(r.get("dish_id", "")).strip() != did:
+            continue
+        if str(r.get("user_hash", "")).strip() != uhash:
+            continue
+        dt = _parse_iso_dt(str(r.get("created_at", "")).strip())
+        if not dt:
+            continue
+        if (last_dt is None) or (dt > last_dt):
+            last_dt = dt
+
+    if last_dt is None:
+        return True, ""
+
+    now = datetime.now(timezone.utc)
+    wait_until = last_dt + timedelta(minutes=DISH_RATE_LIMIT_MINUTES)
+    if now < wait_until:
+        # AJUSTE: mensagem fixa conforme solicitado
+        return False, "Sua avaliação já foi registrada"
+    return True, ""
+
+
+def _request_id_already_exists(request_id: str) -> bool:
+    rows = _read_ws_records("evaluations")
+    if not rows:
+        return False
+    rid = str(request_id).strip()
+    for r in rows:
+        if str(r.get("request_id", "")).strip() == rid:
             return True
     return False
 
@@ -576,14 +574,21 @@ def save_evaluation(
     created_at = iso_now_seconds()
     uhash = phone_hash(user_phone)
 
-    # 1) Anti flood AO VIVO (definitivo)
-    ok_flood, wait_s = _anti_flood_ok_live(uhash, dish_id)
-    if not ok_flood:
-        return False, f"Aguarde {wait_s}s para enviar outra avaliação. Obrigado."
-
-    # 2) Regra diária AO VIVO (definitivo)
+    # 1) regra existente (por dia)
     if already_voted_today(dish_id, uhash):
-        return False, "Você já avaliou este prato hoje. Obrigado."
+        # AJUSTE: mensagem fixa conforme solicitado
+        return False, "Sua avaliação já foi registrada"
+
+    # 2) rate limit por prato + usuario em janela curta (10 min)
+    ok_window, msg_window = _rate_limit_same_dish_rows(dish_id, uhash)
+    if not ok_window:
+        return False, msg_window
+
+    # 3) dedupe forte por request_id (anti multi abas / refresh / simultaneo)
+    request_id = _make_request_id(uhash, dish_id)
+    if _request_id_already_exists(request_id):
+        # AJUSTE: mensagem fixa conforme solicitado
+        return False, "Sua avaliação já foi registrada"
 
     ws = _ws_handles()["evaluations"]
     ws.append_row(
@@ -600,6 +605,7 @@ def save_evaluation(
             harmony,
             str(client_ip or ""),
             str(user_agent or "")[:500],
+            request_id,
         ],
         value_input_option="RAW",
     )
@@ -1034,7 +1040,14 @@ def evaluate_screen(menu: List[dict]) -> None:
     if "session_voted_dishes" not in st.session_state:
         st.session_state["session_voted_dishes"] = set()
 
-    if st.button("Enviar avaliação", key="btn_submit_eval"):
+    # trava por sessao para evitar clique repetido / lag / duplo submit
+    if "submit_lock_until" not in st.session_state:
+        st.session_state["submit_lock_until"] = 0.0
+    locked = time.time() < float(st.session_state.get("submit_lock_until", 0.0))
+
+    if st.button("Enviar avaliação", key="btn_submit_eval", disabled=locked):
+        st.session_state["submit_lock_until"] = time.time() + SUBMIT_LOCK_SECONDS
+
         if not name.strip() or not normalize_phone(phone):
             st.error("Preencha Nome e Telefone corretamente para registrar a avaliação.")
         else:
