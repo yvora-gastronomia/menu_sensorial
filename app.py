@@ -671,19 +671,19 @@ def build_decision_sentence(
 
     if harmony:
         harm_map = {
-            "Equilibrada": "A harmonia foi percebida como equilibrada, com sensação de encaixe natural.",
-            "Contrastante": "A harmonia foi percebida como contrastante, criando alternância de sabores.",
-            "Surpreendente": "A harmonia foi percebida como surpreendente, com efeito claro de descoberta.",
-            "Provocativa": "A harmonia foi percebida como provocativa, para quem gosta de escolhas com personalidade.",
+            "Equilibrada": "A harmonia entre carnes e queijos foi percebida como equilibrada, com sensação de encaixe natural.",
+            "Contrastante": "A harmonia entre carnes e queijos foi percebida como contrastante, criando alternância de sabores.",
+            "Surpreendente": "A harmonia entre carnes e queijos foi percebida como surpreendente, com efeito claro de descoberta.",
+            "Provocativa": "A harmonia entre carnes e queijos foi percebida como provocativa, para quem gosta de escolhas com personalidade.",
         }
         parts.append(harm_map.get(harmony, "A harmonia foi percebida como consistente para o perfil do prato."))
 
     if axis_label:
         axis_map = {
-            "Clássico e Sutil": "O perfil foi descrito como clássico e sutil, elegante e sem exagero.",
-            "Clássico e Marcante": "O perfil foi descrito como clássico e marcante, com presença e assinatura clara.",
-            "Fora do obvio e Sutil": "O perfil foi descrito como fora do obvio e sutil, diferente sem chocar.",
-            "Fora do obvio e Marcante": "O perfil foi descrito como fora do obvio e marcante, com impacto.",
+            "Clássico e Sutil": "O perfil deste prato foi descrito como clássico e sutil, algo elegante e sem exagero.",
+            "Clássico e Marcante": "O perfil deste prato foi descrito como clássico e marcante, algo com uma assinatura clara.",
+            "Fora do obvio e Sutil": "O perfil deste prato foi descrito como fora do obvio e sutil, algo diferente sem chocar.",
+            "Fora do obvio e Marcante": "O perfil deste prato foi descrito como fora do obvio e marcante, algo de impacto.",
         }
         parts.append(axis_map.get(axis_label, "O perfil do prato foi descrito de forma consistente."))
 
