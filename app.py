@@ -697,6 +697,10 @@ def load_menu_from_url(menu_url: str) -> List[dict]:
                 or get(row, "Imagem URL")
                 or get(row, "ImagemURL ")
             )
+            imagem_extra = (
+                get(row, "Imagem")
+                or get(row, "Imagem ")
+            )
 
             if not rid or not prato:
                 continue
@@ -711,6 +715,7 @@ def load_menu_from_url(menu_url: str) -> List[dict]:
                     "Etapa": etapa,
                     "Ativo": ativo,
                     "ImagemURL": imagem_url,
+                    "Imagem": imagem_extra,
                 }
             )
 
@@ -733,6 +738,13 @@ def get_dish_image(dish: dict):
     if url:
         return fetch_image_bytes(url)
     return find_image_by_id(str(dish.get("Id", "")))
+
+
+def get_dish_extra_image(dish: dict):
+    url = str(dish.get("Imagem", "") or "").strip()
+    if url:
+        return fetch_image_bytes(url)
+    return None
 
 
 # ===============================
@@ -940,8 +952,18 @@ def explore_screen(menu: List[dict]) -> None:
         st.markdown("<div class='yv-card'>", unsafe_allow_html=True)
 
         img = get_dish_image(dish)
-        if img:
+        img_extra = get_dish_extra_image(dish)
+
+        if img and img_extra:
+            col_img1, col_img2 = st.columns(2)
+            with col_img1:
+                st.image(img, use_container_width=True)
+            with col_img2:
+                st.image(img_extra, use_container_width=True)
+        elif img:
             st.image(img, use_container_width=True)
+        elif img_extra:
+            st.image(img_extra, use_container_width=True)
 
         if dish["Id"] in rank_map:
             if rank_map[dish["Id"]] == 1:
