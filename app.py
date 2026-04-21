@@ -45,6 +45,9 @@ DEFAULT_WS_EVALS = "evaluations"
 DEFAULT_WS_INTERACTIONS = "interactions"
 DEFAULT_WS_SETTINGS = "settings"
 
+# NOVO: aba onde está o token em A1
+TOKEN_SHEET_NAME = "senha"
+
 # Controle básico (anti flood / anti duplicidade)
 RATE_LIMIT_SECONDS = 20
 ALLOW_DUPLICATE_SAME_DISH_PER_DAY = False
@@ -255,8 +258,6 @@ def _client_ip_allowed() -> bool:
 
     ip_str = safe_client_ip()
 
-    # Fallback: se o ambiente nao expor o IP do cliente (comum em proxies),
-    # nao bloqueia a operacao.
     if not ip_str:
         return True
 
@@ -300,22 +301,6 @@ def _admin_config_message() -> str:
 # GOOGLE SHEETS (persistência)
 # ===============================
 def _get_gsheets_conf() -> dict:
-    """
-    Espera em secrets:
-      [gsheets]
-      sheet_id = "..."
-      evaluations_ws = "evaluations" (opcional)
-      interactions_ws = "interactions" (opcional)
-      settings_ws = "settings" (opcional)
-
-    E credenciais:
-      [gcp_service_account]
-      type="service_account"
-      project_id="..."
-      private_key="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-      client_email="..."
-      token_uri="https://oauth2.googleapis.com/token"
-    """
     gs = {}
     try:
         gs = dict(st.secrets.get("gsheets", {}))
@@ -406,7 +391,6 @@ def _ws_handles():
             "harmony",
             "client_ip",
             "user_agent",
-            # ADICIONADO: dedupe e anti abuso (compatível via header append)
             "request_id",
         ],
     )
@@ -441,6 +425,17 @@ def _read_ws_records(kind: str) -> List[dict]:
         return []
 
 
+@st.cache_data(ttl=30)
+def get_daily_eval_token() -> str:
+    try:
+        sh = _open_sheet()
+        ws = sh.worksheet(TOKEN_SHEET_NAME)
+        val = ws.acell("A1").value
+        return str(val or "").strip()
+    except Exception:
+        return ""
+
+
 def _clear_ws_cache():
     try:
         _read_ws_records.clear()
@@ -448,6 +443,10 @@ def _clear_ws_cache():
         pass
     try:
         load_menu_from_url.clear()
+    except Exception:
+        pass
+    try:
+        get_daily_eval_token.clear()
     except Exception:
         pass
 
@@ -515,7 +514,7 @@ def already_voted_today(dish_id: str, user_hash: str) -> bool:
 
 
 # ===============================
-# ANTI ABUSO (NOVO - PONTUAL)
+# ANTI ABUSO
 # ===============================
 def _parse_iso_dt(s: str) -> Optional[datetime]:
     if not s:
@@ -536,9 +535,6 @@ def _make_request_id(user_hash: str, dish_id: str) -> str:
 
 
 def _rate_limit_same_dish_rows(dish_id: str, user_hash: str) -> Tuple[bool, str]:
-    """
-    Limite por prato + usuario (telefone hash) dentro de uma janela curta.
-    """
     rows = _read_ws_records("evaluations")
     if not rows:
         return True, ""
@@ -564,7 +560,6 @@ def _rate_limit_same_dish_rows(dish_id: str, user_hash: str) -> Tuple[bool, str]
     now = datetime.now(timezone.utc)
     wait_until = last_dt + timedelta(minutes=DISH_RATE_LIMIT_MINUTES)
     if now < wait_until:
-        # AJUSTE: mensagem fixa conforme solicitado
         return False, "Sua avaliação já foi registrada"
     return True, ""
 
@@ -595,20 +590,15 @@ def save_evaluation(
     created_at = iso_now_seconds()
     uhash = phone_hash(user_phone)
 
-    # 1) regra existente (por dia)
     if already_voted_today(dish_id, uhash):
-        # AJUSTE: mensagem fixa conforme solicitado
         return False, "Sua avaliação já foi registrada"
 
-    # 2) rate limit por prato + usuario em janela curta (10 min)
     ok_window, msg_window = _rate_limit_same_dish_rows(dish_id, uhash)
     if not ok_window:
         return False, msg_window
 
-    # 3) dedupe forte por request_id (anti multi abas / refresh / simultaneo)
     request_id = _make_request_id(uhash, dish_id)
     if _request_id_already_exists(request_id):
-        # AJUSTE: mensagem fixa conforme solicitado
         return False, "Sua avaliação já foi registrada"
 
     ws = _ws_handles()["evaluations"]
@@ -786,7 +776,7 @@ def get_dish_video_url(dish: dict) -> str:
 
 
 # ===============================
-# TEXTO PARA DECISÃO (Explorar)
+# TEXTO PARA DECISÃO
 # ===============================
 def build_decision_sentence(
     intention: Optional[str], harmony: Optional[str], axis_label: Optional[str]
@@ -1100,6 +1090,8 @@ def evaluate_screen(menu: List[dict]) -> None:
     with col2:
         phone = st.text_input("Telefone (WhatsApp)", key="user_phone")
 
+    token_input = st.text_input("Token de validação", type="password", key="eval_token")
+
     consent = st.checkbox(
         "Aceito receber promoções e ofertas especiais exclusivas neste número, conforme a Lei Geral de Proteção de Dados.",
         value=True,
@@ -1109,7 +1101,6 @@ def evaluate_screen(menu: List[dict]) -> None:
     if "session_voted_dishes" not in st.session_state:
         st.session_state["session_voted_dishes"] = set()
 
-    # trava por sessao para evitar clique repetido / lag / duplo submit
     if "submit_lock_until" not in st.session_state:
         st.session_state["submit_lock_until"] = 0.0
     locked = time.time() < float(st.session_state.get("submit_lock_until", 0.0))
@@ -1117,7 +1108,15 @@ def evaluate_screen(menu: List[dict]) -> None:
     if st.button("Enviar avaliação", key="btn_submit_eval", disabled=locked):
         st.session_state["submit_lock_until"] = time.time() + SUBMIT_LOCK_SECONDS
 
-        if not name.strip() or not normalize_phone(phone):
+        expected_token = get_daily_eval_token()
+
+        if not expected_token:
+            st.error("Token de avaliação não configurado. Verifique a aba de senha da planilha.")
+        elif not str(token_input or "").strip():
+            st.error("Informe o token de validação para enviar a avaliação.")
+        elif str(token_input).strip() != expected_token:
+            st.error("Token inválido.")
+        elif not name.strip() or not normalize_phone(phone):
             st.error("Preencha Nome e Telefone corretamente para registrar a avaliação.")
         else:
             ok_rl, wait_s = _rate_limit_ok()
