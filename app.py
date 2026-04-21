@@ -155,6 +155,27 @@ def _to_github_raw(url: str) -> str:
     return url
 
 
+def _to_youtube_embed(url: str) -> str:
+    if not url:
+        return ""
+
+    u = url.strip()
+
+    patterns = [
+        r"(?:youtube\.com/watch\?v=)([a-zA-Z0-9_-]{6,})",
+        r"(?:youtu\.be/)([a-zA-Z0-9_-]{6,})",
+        r"(?:youtube\.com/shorts/)([a-zA-Z0-9_-]{6,})",
+        r"(?:youtube\.com/embed/)([a-zA-Z0-9_-]{6,})",
+    ]
+
+    for p in patterns:
+        m = re.search(p, u)
+        if m:
+            return f"https://www.youtube.com/embed/{m.group(1)}"
+
+    return u
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_image_bytes(url: str) -> Optional[bytes]:
     """
@@ -701,6 +722,18 @@ def load_menu_from_url(menu_url: str) -> List[dict]:
                 get(row, "Imagem")
                 or get(row, "Imagem ")
             )
+            video_url = (
+                get(row, "VideoURL")
+                or get(row, "Video Url")
+                or get(row, "Video URL")
+                or get(row, "VídeoURL")
+                or get(row, "Vídeo Url")
+                or get(row, "Vídeo URL")
+                or get(row, "LinkVideo")
+                or get(row, "Link Video")
+                or get(row, "Link do Video")
+                or get(row, "Link do Vídeo")
+            )
 
             if not rid or not prato:
                 continue
@@ -716,6 +749,7 @@ def load_menu_from_url(menu_url: str) -> List[dict]:
                     "Ativo": ativo,
                     "ImagemURL": imagem_url,
                     "Imagem": imagem_extra,
+                    "VideoURL": video_url,
                 }
             )
 
@@ -745,6 +779,10 @@ def get_dish_extra_image(dish: dict):
     if url:
         return fetch_image_bytes(url)
     return None
+
+
+def get_dish_video_url(dish: dict) -> str:
+    return _to_youtube_embed(str(dish.get("VideoURL", "") or "").strip())
 
 
 # ===============================
@@ -953,6 +991,7 @@ def explore_screen(menu: List[dict]) -> None:
 
         img = get_dish_image(dish)
         img_extra = get_dish_extra_image(dish)
+        video_url = get_dish_video_url(dish)
 
         if img and img_extra:
             col_img1, col_img2 = st.columns(2)
@@ -964,6 +1003,9 @@ def explore_screen(menu: List[dict]) -> None:
             st.image(img, use_container_width=True)
         elif img_extra:
             st.image(img_extra, use_container_width=True)
+
+        if video_url:
+            st.video(video_url)
 
         if dish["Id"] in rank_map:
             if rank_map[dish["Id"]] == 1:
@@ -1025,8 +1067,13 @@ def evaluate_screen(menu: List[dict]) -> None:
     st.markdown("<div class='yv-card'>", unsafe_allow_html=True)
 
     img = get_dish_image(dish)
+    video_url = get_dish_video_url(dish)
+
     if img:
         st.image(img, use_container_width=True)
+
+    if video_url:
+        st.video(video_url)
 
     st.markdown(f"<div class='yv-h'>{dish['Prato']}</div>", unsafe_allow_html=True)
     if dish.get("Descrição"):
