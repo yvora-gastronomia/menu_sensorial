@@ -40,7 +40,7 @@ DEFAULT_SHEETS_CSV_URL = (
     "/gviz/tq?tqx=out:csv&sheet=menu.csv"
 )
 
-# Nomes das abas no Google Sheet (pode trocar via secrets)
+# Nomes das abas no Google Sheet
 DEFAULT_WS_EVALS = "evaluations"
 DEFAULT_WS_INTERACTIONS = "interactions"
 DEFAULT_WS_SETTINGS = "settings"
@@ -48,14 +48,14 @@ DEFAULT_WS_SETTINGS = "settings"
 # Aba onde está o token em A1
 TOKEN_SHEET_NAME = "Token_menu"
 
-# Controle básico (anti flood / anti duplicidade)
+# Controle básico
 RATE_LIMIT_SECONDS = 20
 ALLOW_DUPLICATE_SAME_DISH_PER_DAY = False
 
-# CONTROLES ANTI ABUSO (camadas)
-SUBMIT_LOCK_SECONDS = 8            # trava o botao por sessao apos clique
-DISH_RATE_LIMIT_MINUTES = 10       # 1 avaliacao por prato por telefone dentro da janela de 10 minutos
-REQUEST_BUCKET_SECONDS = 30        # dedupe forte: mesmo prato + user_hash no mesmo bucket nao grava 2x
+# Controles anti abuso
+SUBMIT_LOCK_SECONDS = 8
+DISH_RATE_LIMIT_MINUTES = 10
+REQUEST_BUCKET_SECONDS = 30
 
 
 # ===============================
@@ -120,7 +120,6 @@ def iso_now_seconds() -> str:
 
 
 def safe_client_ip() -> str:
-    # Em Streamlit Cloud, pegar IP real do cliente não é confiável via app puro
     return ""
 
 
@@ -129,7 +128,7 @@ def safe_user_agent() -> str:
 
 
 # ===============================
-# IMAGENS (SOLUÇÃO DEFINITIVA)
+# IMAGENS
 # ===============================
 def _extract_drive_file_id(url: str):
     if not url:
@@ -210,7 +209,7 @@ def fetch_image_bytes(url: str) -> Optional[bytes]:
 
 
 # ===============================
-# RESTRIÇÃO POR WIFI (IP)
+# RESTRIÇÃO POR WIFI
 # ===============================
 def _parse_ip_list(raw: str) -> List[ipaddress._BaseNetwork]:
     nets: List[ipaddress._BaseNetwork] = []
@@ -244,7 +243,6 @@ def _client_ip_allowed() -> bool:
         return True
 
     ip_str = safe_client_ip()
-
     if not ip_str:
         return True
 
@@ -280,7 +278,7 @@ def _admin_config_message() -> str:
 
 
 # ===============================
-# GOOGLE SHEETS (persistência)
+# GOOGLE SHEETS
 # ===============================
 def _get_gsheets_conf() -> dict:
     gs = {}
@@ -651,7 +649,7 @@ def top3_dishes_by_reviews() -> List[str]:
 
 
 # ===============================
-# MENU (Google Sheets CSV)
+# MENU
 # ===============================
 def _normalize_colname(s: str) -> str:
     return (s or "").strip().lower()
@@ -990,16 +988,6 @@ def explore_screen(menu: List[dict]) -> None:
         st.markdown(f"<div class='yv-h'>{dish['Prato']}</div>", unsafe_allow_html=True)
         if dish.get("Descrição"):
             st.markdown(f"<div class='yv-p'>{dish.get('Descrição')}</div>", unsafe_allow_html=True)
-
-        meta = []
-        if dish.get("Etapa"):
-            meta.append(dish["Etapa"])
-        if dish.get("Carne"):
-            meta.append(f"Carne: {dish['Carne']}")
-        if dish.get("Queijo"):
-            meta.append(f"Queijo: {dish['Queijo']}")
-        if meta:
-            st.caption(" | ".join(meta))
 
         intent = top_choice(fetch_counts(dish["Id"], "intention"))
         harm = top_choice(fetch_counts(dish["Id"], "harmony"))
