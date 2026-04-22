@@ -24,7 +24,7 @@ APP_TITLE = "Cardápio Sensorial | YVORA"
 
 ASSET_DIR = "asset"
 LOGO_PATH = os.path.join(ASSET_DIR, "yvora_logo.png")
-ROOT_LOGO_PATH = "yvora_logo.png"  # logo na raiz do repo
+ROOT_LOGO_PATH = "yvora_logo.png"
 DISH_IMG_DIR = os.path.join(ASSET_DIR, "dishes")
 
 COLOR_NAVY = "#0E2A47"
@@ -40,19 +40,13 @@ DEFAULT_SHEETS_CSV_URL = (
     "/gviz/tq?tqx=out:csv&sheet=menu.csv"
 )
 
-# Nomes das abas no Google Sheet
 DEFAULT_WS_EVALS = "evaluations"
 DEFAULT_WS_INTERACTIONS = "interactions"
 DEFAULT_WS_SETTINGS = "settings"
 
-# Aba onde está o token em A1
-TOKEN_SHEET_NAME = "Token_menu"
-
-# Controle básico
 RATE_LIMIT_SECONDS = 20
 ALLOW_DUPLICATE_SAME_DISH_PER_DAY = False
 
-# Controles anti abuso
 SUBMIT_LOCK_SECONDS = 8
 DISH_RATE_LIMIT_MINUTES = 10
 REQUEST_BUCKET_SECONDS = 30
@@ -291,11 +285,24 @@ def _get_gsheets_conf() -> dict:
     if not sheet_id:
         raise RuntimeError("Faltou configurar o sheet_id em secrets (seção [gsheets]).")
 
+    token_sheet_id = (
+        gs.get("token_sheet_id")
+        or st.secrets.get("token_sheet_id")
+        or "1sM5MydAxcn5t0SeeU-cpRR9z3iFPeCYSBCgZ8GYArFk"
+    )
+    token_sheet_name = (
+        gs.get("token_sheet_name")
+        or st.secrets.get("token_sheet_name")
+        or "Token_menu"
+    )
+
     return {
         "sheet_id": str(sheet_id).strip(),
         "evaluations_ws": str(gs.get("evaluations_ws") or DEFAULT_WS_EVALS),
         "interactions_ws": str(gs.get("interactions_ws") or DEFAULT_WS_INTERACTIONS),
         "settings_ws": str(gs.get("settings_ws") or DEFAULT_WS_SETTINGS),
+        "token_sheet_id": str(token_sheet_id).strip(),
+        "token_sheet_name": str(token_sheet_name).strip(),
     }
 
 
@@ -317,6 +324,11 @@ def _gs_client() -> gspread.Client:
 def _open_sheet():
     conf = _get_gsheets_conf()
     return _gs_client().open_by_key(conf["sheet_id"])
+
+
+def _open_token_sheet():
+    conf = _get_gsheets_conf()
+    return _gs_client().open_by_key(conf["token_sheet_id"])
 
 
 def _ensure_headers_compat(ws, headers: List[str]) -> None:
@@ -408,8 +420,9 @@ def _read_ws_records(kind: str) -> List[dict]:
 @st.cache_data(ttl=30)
 def get_daily_eval_token() -> str:
     try:
-        sh = _open_sheet()
-        ws = sh.worksheet(TOKEN_SHEET_NAME)
+        conf = _get_gsheets_conf()
+        sh = _open_token_sheet()
+        ws = sh.worksheet(conf["token_sheet_name"])
         val = ws.acell("A1").value
         return str(val or "").strip()
     except Exception:
