@@ -110,7 +110,8 @@ def find_image_by_id(dish_id: str) -> Optional[str]:
 
 
 def iso_now_seconds() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    brasilia_tz = timezone(timedelta(hours=-3))
+    return datetime.now(brasilia_tz).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def safe_client_ip() -> str:
