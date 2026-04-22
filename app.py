@@ -1094,7 +1094,7 @@ def evaluate_screen(menu: List[dict]) -> None:
         typed_token = str(token_input or "").strip()
 
         if not expected_token:
-            st.error("Token de avaliação não configurado. Verifique a aba de senha da planilha.")
+            st.error("Token incorreto. Confirme o número do Token com algum atendente.")
         elif not typed_token:
             st.error("Informe o token de validação para enviar a avaliação.")
         elif typed_token != expected_token:
