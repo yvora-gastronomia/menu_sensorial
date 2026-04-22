@@ -285,24 +285,11 @@ def _get_gsheets_conf() -> dict:
     if not sheet_id:
         raise RuntimeError("Faltou configurar o sheet_id em secrets (seção [gsheets]).")
 
-    token_sheet_id = (
-        gs.get("token_sheet_id")
-        or st.secrets.get("token_sheet_id")
-        or "1sM5MydAxcn5t0SeeU-cpRR9z3iFPeCYSBCgZ8GYArFk"
-    )
-    token_sheet_name = (
-        gs.get("token_sheet_name")
-        or st.secrets.get("token_sheet_name")
-        or "Token_menu"
-    )
-
     return {
         "sheet_id": str(sheet_id).strip(),
         "evaluations_ws": str(gs.get("evaluations_ws") or DEFAULT_WS_EVALS),
         "interactions_ws": str(gs.get("interactions_ws") or DEFAULT_WS_INTERACTIONS),
         "settings_ws": str(gs.get("settings_ws") or DEFAULT_WS_SETTINGS),
-        "token_sheet_id": str(token_sheet_id).strip(),
-        "token_sheet_name": str(token_sheet_name).strip(),
     }
 
 
@@ -324,11 +311,6 @@ def _gs_client() -> gspread.Client:
 def _open_sheet():
     conf = _get_gsheets_conf()
     return _gs_client().open_by_key(conf["sheet_id"])
-
-
-def _open_token_sheet():
-    conf = _get_gsheets_conf()
-    return _gs_client().open_by_key(conf["token_sheet_id"])
 
 
 def _ensure_headers_compat(ws, headers: List[str]) -> None:
@@ -421,9 +403,9 @@ def _read_ws_records(kind: str) -> List[dict]:
 def get_daily_eval_token() -> str:
     try:
         conf = _get_gsheets_conf()
-        sh = _open_token_sheet()
-        ws = sh.worksheet(conf["token_sheet_name"])
-        val = ws.acell("A1").value
+        sh = _open_sheet()
+        ws = sh.worksheet(conf["settings_ws"])
+        val = ws.acell("A2").value
         return str(val or "").strip()
     except Exception:
         return ""
