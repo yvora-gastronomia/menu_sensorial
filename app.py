@@ -45,8 +45,8 @@ DEFAULT_WS_EVALS = "evaluations"
 DEFAULT_WS_INTERACTIONS = "interactions"
 DEFAULT_WS_SETTINGS = "settings"
 
-# NOVO: aba onde está o token em A1
-TOKEN_SHEET_NAME = "senha"
+# Aba onde está o token em A1
+TOKEN_SHEET_NAME = "Token_menu"
 
 # Controle básico (anti flood / anti duplicidade)
 RATE_LIMIT_SECONDS = 20
@@ -54,7 +54,7 @@ ALLOW_DUPLICATE_SAME_DISH_PER_DAY = False
 
 # CONTROLES ANTI ABUSO (camadas)
 SUBMIT_LOCK_SECONDS = 8            # trava o botao por sessao apos clique
-DISH_RATE_LIMIT_MINUTES = 10       # AJUSTE: 1 avaliacao por prato por telefone dentro da janela de 10 minutos
+DISH_RATE_LIMIT_MINUTES = 10       # 1 avaliacao por prato por telefone dentro da janela de 10 minutos
 REQUEST_BUCKET_SECONDS = 30        # dedupe forte: mesmo prato + user_hash no mesmo bucket nao grava 2x
 
 
@@ -181,17 +181,11 @@ def _to_youtube_embed(url: str) -> str:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_image_bytes(url: str) -> Optional[bytes]:
-    """
-    Solução definitiva:
-    Baixa a imagem no backend e retorna bytes.
-    Isso evita o problema do Google Drive servir HTML, viewer, confirmações e redirects que quebram o <img>.
-    """
     if not url:
         return None
 
     url = url.strip()
 
-    # Google Drive: usa thumbnail que é o endpoint mais estável para embed de imagem
     if _is_drive_url(url):
         fid = _extract_drive_file_id(url)
         if not fid:
@@ -237,13 +231,6 @@ def _parse_ip_list(raw: str) -> List[ipaddress._BaseNetwork]:
 
 
 def _client_ip_allowed() -> bool:
-    """
-    Regra inteligente:
-      - Se houver allowlist configurada em RESTAURANT_ALLOWED_IP_RANGES:
-          - Se o IP do cliente for detectado, valida normalmente
-          - Se o IP do cliente nao for detectado, permite (fallback)
-      - Se nao houver allowlist configurada, permite
-    """
     try:
         raw = str(st.secrets.get("RESTAURANT_ALLOWED_IP_RANGES", "")).strip()
     except Exception:
@@ -269,11 +256,6 @@ def _client_ip_allowed() -> bool:
 
 
 def _safe_get_admin_password() -> Optional[str]:
-    """
-    Lê a senha do Admin a partir de:
-      1) st.secrets["admin_password"]
-      2) variáveis de ambiente (YVORA_ADMIN_PASSWORD / ADMIN_PASSWORD)
-    """
     try:
         pw = st.secrets.get("admin_password")
         if pw and str(pw).strip():
@@ -626,7 +608,7 @@ def save_evaluation(
     save_interaction(str(dish_id), uhash, "harmony", harmony)
 
     _clear_ws_cache()
-    return True, "Avaliação enviada com sucesso."
+    return True, "Avaliação enviada com sucesso"
 
 
 def fetch_counts(dish_id: str, itype: str) -> Dict[str, int]:
@@ -1109,13 +1091,14 @@ def evaluate_screen(menu: List[dict]) -> None:
         st.session_state["submit_lock_until"] = time.time() + SUBMIT_LOCK_SECONDS
 
         expected_token = get_daily_eval_token()
+        typed_token = str(token_input or "").strip()
 
         if not expected_token:
             st.error("Token de avaliação não configurado. Verifique a aba de senha da planilha.")
-        elif not str(token_input or "").strip():
+        elif not typed_token:
             st.error("Informe o token de validação para enviar a avaliação.")
-        elif str(token_input).strip() != expected_token:
-            st.error("Token inválido.")
+        elif typed_token != expected_token:
+            st.error("Token incorreto")
         elif not name.strip() or not normalize_phone(phone):
             st.error("Preencha Nome e Telefone corretamente para registrar a avaliação.")
         else:
@@ -1142,8 +1125,7 @@ def evaluate_screen(menu: List[dict]) -> None:
                     if ok:
                         st.session_state["session_voted_dishes"].add(did)
                         st.session_state["last_submit_ts"] = int(datetime.now().timestamp())
-
-                        st.session_state["flash_success"] = msg
+                        st.session_state["flash_success"] = "Avaliação enviada com sucesso"
                         st.session_state["goto_page"] = "Explorar"
                         st.rerun()
                     else:
