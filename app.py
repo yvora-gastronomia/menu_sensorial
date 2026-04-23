@@ -173,7 +173,6 @@ def _to_youtube_embed(url: str) -> str:
     return u
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def fetch_image_bytes(url: str) -> Optional[bytes]:
     if not url:
         return None
@@ -184,12 +183,16 @@ def fetch_image_bytes(url: str) -> Optional[bytes]:
         fid = _extract_drive_file_id(url)
         if not fid:
             return None
-        url = f"https://drive.google.com/uc?export=view&id={fid}"
+        url = f"https://drive.google.com/uc?export=view&id={fid}&ts={int(time.time())}"
 
     url = _to_github_raw(url)
 
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
         r = requests.get(url, headers=headers, timeout=25, allow_redirects=True)
         if r.status_code != 200:
             return None
@@ -455,6 +458,7 @@ def get_setting(key: str) -> Optional[str]:
 
 def get_menu_url() -> str:
     return DEFAULT_SHEETS_CSV_URL
+
 
 def save_interaction(dish_id: str, user_hash: str, itype: str, value: str) -> None:
     ws = _ws_handles()["interactions"]
