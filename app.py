@@ -454,11 +454,7 @@ def get_setting(key: str) -> Optional[str]:
 
 
 def get_menu_url() -> str:
-    val = get_setting("menu_csv_url")
-    if val and val.strip():
-        return val.strip()
     return DEFAULT_SHEETS_CSV_URL
-
 
 def save_interaction(dish_id: str, user_hash: str, itype: str, value: str) -> None:
     ws = _ws_handles()["interactions"]
