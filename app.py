@@ -184,7 +184,7 @@ def fetch_image_bytes(url: str) -> Optional[bytes]:
         fid = _extract_drive_file_id(url)
         if not fid:
             return None
-        url = f"https://drive.google.com/thumbnail?id={fid}&sz=w1600"
+        url = f"https://drive.google.com/uc?export=view&id={fid}"
 
     url = _to_github_raw(url)
 
