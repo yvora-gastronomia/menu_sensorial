@@ -173,7 +173,7 @@ def _to_youtube_embed(url: str) -> str:
     return u
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_image_bytes(url: str) -> Optional[bytes]:
     if not url:
         return None
