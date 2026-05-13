@@ -882,53 +882,18 @@ def render_sidebar() -> str:
         key="nav_choice",
     )
 
+    # Mantém a navegação pública funcionando normalmente.
+    # Se alguma sessão antiga estiver em Admin, volta automaticamente para a área pública.
     if current_page == "Admin":
-        if st.session_state["nav_choice"] != st.session_state["nav_choice_prev"]:
-            st.session_state["page"] = st.session_state["nav_choice"]
-            current_page = st.session_state["page"]
+        st.session_state["page"] = st.session_state["nav_choice"]
+        current_page = st.session_state["page"]
     else:
         st.session_state["page"] = st.session_state["nav_choice"]
         current_page = st.session_state["page"]
 
     st.session_state["nav_choice_prev"] = st.session_state["nav_choice"]
 
-    st.sidebar.divider()
-    st.sidebar.markdown("## Admin")
-
-    admin_pw = _safe_get_admin_password()
-    is_admin = bool(st.session_state.get("is_admin", False))
-
-    if is_admin:
-        st.sidebar.success("Admin autenticado.")
-        if st.sidebar.button("Sair do Admin"):
-            st.session_state["is_admin"] = False
-            st.session_state["page"] = "Explorar"
-            st.session_state["nav_choice"] = "Explorar"
-            st.session_state["nav_choice_prev"] = "Explorar"
-            st.rerun()
-
-        if st.sidebar.button("Ir para Admin"):
-            st.session_state["page"] = "Admin"
-            st.rerun()
-
-    else:
-        if not admin_pw:
-            st.sidebar.info(_admin_config_message())
-
-        pw_in = st.sidebar.text_input("Senha", type="password", key="admin_pw_input")
-
-        if st.sidebar.button("Entrar"):
-            admin_pw_now = _safe_get_admin_password()
-            if not admin_pw_now:
-                st.sidebar.error("Defina a senha em Secrets para habilitar o Admin.")
-            elif (pw_in or "") == admin_pw_now:
-                st.session_state["is_admin"] = True
-                st.session_state["page"] = "Admin"
-                st.rerun()
-            else:
-                st.sidebar.error("Senha incorreta.")
-
-    return st.session_state.get("page", "Explorar")
+    return current_page
 
 
 # ===============================
